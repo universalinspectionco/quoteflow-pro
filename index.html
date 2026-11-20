@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="description" content="QuoteFlow Pro — Professional Quotation & Price Book Management System by UIC" />
+    <title>QuoteFlow Pro | UIC</title>
+    <style>
+      /* Loading splash screen */
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: #0f172a;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        transition: opacity 0.5s ease;
+      }
+      #splash.fade-out {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #splash .logo {
+        font-size: 32px;
+        font-weight: 700;
+        color: #38bdf8;
+        letter-spacing: 2px;
+      }
+      #splash .sub {
+        color: #64748b;
+        font-size: 13px;
+        letter-spacing: 1px;
+      }
+      #splash .bar-wrap {
+        width: 200px;
+        height: 3px;
+        background: #1e293b;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      #splash .bar {
+        height: 100%;
+        width: 40%;
+        background: linear-gradient(90deg, #38bdf8, #818cf8);
+        border-radius: 3px;
+        animation: shimmer 1.2s ease-in-out infinite;
+      }
+      @keyframes shimmer {
+        0% { transform: translateX(-150%); }
+        100% { transform: translateX(250%); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="splash">
+      <div class="logo">QUOTEFLOW PRO</div>
+      <div class="sub">Universal Inspection Co. Ltd.</div>
+      <div class="bar-wrap"><div class="bar"></div></div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

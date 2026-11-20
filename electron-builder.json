@@ -1,0 +1,51 @@
+{
+  "appId": "com.uic.quoteflowpro",
+  "productName": "QuoteFlow Pro",
+  "copyright": "Copyright © 2026 Universal Inspection Co. Ltd.",
+  "electronVersion": "33.2.0",
+  "directories": {
+    "output": "public/downloads/desktop-release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*"
+  ],
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "universalinspectionco",
+      "repo": "Quotation-Manager-V2"
+    }
+  ],
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "icon": "public/app-icon.ico",
+    "signAndEditExecutable": false,
+    "certificateSubjectName": ""
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "runAfterFinish": true,
+    "installerIcon": "public/app-icon.ico",
+    "uninstallerIcon": "public/app-icon.ico",
+    "license": "LICENSE.md",
+    "shortcutName": "QuoteFlow Pro"
+  },
+  "portable": {
+    "artifactName": "QuoteFlow-Pro-Windows-Portable.zip"
+  },
+  "mac": {
+    "target": ["dmg", "zip"],
+    "category": "public.app-category.business"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Office"
+  }
+}
