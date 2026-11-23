@@ -1,11 +1,22 @@
 "use client"
 
 import { motion, AnimatePresence } from 'motion/react'
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
-  Building, FileText, PenTool, Palette, Hash, Shield, Database, Download, Upload, RotateCcw, Trash2, Save, Eye, Globe, Moon, Sun, Bell, Key, User, Plus, X, Folder,
+  Building, FileText, PenTool, Palette, Hash, Shield, Database, Download, Upload, RotateCcw, Trash2, Save, Eye, Globe, Moon, Sun, Bell, Key, User, Plus, X, Folder, Check,
 } from 'lucide-react'
 import { useStore } from '@/services/store'
+import {
+  createBackup,
+  listBackupFiles,
+  openBackupFolder,
+  parseBackup,
+  pickBackupFile,
+  pickBackupFolder,
+  readBackupFromFolder,
+  saveBackup,
+  saveBackupToFolder,
+} from '@/services/backup'
 import { useTheme } from '@/hooks/useTheme'
 
 const settingsSections = [
@@ -19,10 +30,39 @@ const settingsSections = [
 ] as { id: string; label: string; description: string; icon: any }[]
 
 export function SettingsView() {
-  const { settings, updateSettings, preferences, updatePreferences, addToast } = useStore()
+  const {
+    settings,
+    updateSettings,
+    preferences,
+    updatePreferences,
+    addToast,
+    quotations,
+    priceBook,
+    companies,
+    activeCompanyId,
+    restoreBackup,
+    resetSettings,
+    setQuotations,
+    setPriceBook,
+  } = useStore()
   const { theme: currentTheme, setTheme, themes } = useTheme()
   const [activeSection, setActiveSection] = useState<'company' | 'letterhead' | 'signature' | 'branding' | 'numbering' | 'defaults' | 'storage'>('company')
   const [showResetConfirm, setShowResetConfirm] = useState(false)
+  const [backups, setBackups] = useState<string[]>([])
+  const folder = preferences.backupFolder || ''
+
+  const refreshBackups = useCallback(async () => {
+    setBackups(await listBackupFiles(folder))
+  }, [folder])
+
+  useEffect(() => {
+    void refreshBackups()
+  }, [refreshBackups])
+
+  const currentBackup = useCallback(
+    () => createBackup({ settings, preferences, quotations, priceBook, companies, activeCompanyId }),
+    [settings, preferences, quotations, priceBook, companies, activeCompanyId],
+  )
 
   const handleSave = () => {
     addToast({ type: 'success', title: 'Settings Saved', message: 'All changes have been applied' })
@@ -33,9 +73,85 @@ export function SettingsView() {
   }
 
   const confirmReset = () => {
-    // Reset to defaults would go here
-    addToast({ type: 'success', title: 'Reset Complete', message: 'Settings restored to defaults' })
+    resetSettings()
+    addToast({ type: 'success', title: 'Reset Complete', message: 'Settings restored to 15% VAT / SAR defaults' })
     setShowResetConfirm(false)
+  }
+
+  const handleExportData = async () => {
+    const saved = await saveBackup(currentBackup())
+    addToast(saved
+      ? { type: 'success', title: 'Backup Saved', message: 'JSON backup written successfully' }
+      : { type: 'error', title: 'Backup Cancelled', message: 'No file was written' })
+  }
+
+  const handleImportData = async () => {
+    try {
+      const content = await pickBackupFile()
+      if (!content) return
+      restoreBackup(parseBackup(content))
+      addToast({ type: 'success', title: 'Restore Complete', message: 'Backup data restored' })
+    } catch (err) {
+      console.error('Backup restore failed:', err)
+      addToast({
+        type: 'error',
+        title: 'Restore Failed',
+        message: err instanceof Error ? err.message : 'Could not read the backup file',
+      })
+    }
+  }
+
+  const handleClearData = () => {
+    if (!window.confirm('Delete all quotations and price book items? This cannot be undone.')) return
+    setQuotations([])
+    setPriceBook([])
+    addToast({ type: 'success', title: 'Data Cleared', message: 'Quotations and price book are empty' })
+  }
+
+  const handleChooseFolder = async () => {
+    const picked = await pickBackupFolder()
+    if (!picked) {
+      addToast({ type: 'info', title: 'No Folder Selected', message: 'Folder selection was cancelled' })
+      return
+    }
+    updatePreferences({ backupFolder: picked })
+    addToast({ type: 'success', title: 'Backup Folder Set', message: picked })
+  }
+
+  const handleOpenFolder = async () => {
+    if (!(await openBackupFolder(folder))) {
+      addToast({ type: 'info', title: 'Folder Unavailable', message: 'Choose a local backup folder first' })
+    }
+  }
+
+  const handleSaveToFolder = async () => {
+    if (!folder) {
+      addToast({ type: 'warning', title: 'No Folder Selected', message: 'Choose a local backup folder first' })
+      return
+    }
+    const path = await saveBackupToFolder(currentBackup(), folder)
+    if (!path) {
+      addToast({ type: 'error', title: 'Backup Failed', message: 'Could not write to the selected folder' })
+      return
+    }
+    await refreshBackups()
+    addToast({ type: 'success', title: 'Backup Saved', message: path })
+  }
+
+  const handleRestoreFromFolder = async (name: string) => {
+    try {
+      const content = await readBackupFromFolder(folder, name)
+      if (!content) throw new Error('Could not read the selected backup')
+      restoreBackup(parseBackup(content))
+      addToast({ type: 'success', title: 'Restore Complete', message: `${name} restored` })
+    } catch (err) {
+      console.error('Folder restore failed:', err)
+      addToast({
+        type: 'error',
+        title: 'Restore Failed',
+        message: err instanceof Error ? err.message : 'Could not restore this backup',
+      })
+    }
   }
 
   return (
@@ -130,7 +246,27 @@ export function SettingsView() {
               {activeSection === 'signature' && <SignatureSettingsForm settings={settings.signature} onChange={updateSettings} />}
               {activeSection === 'branding' && <BrandingSettingsForm settings={settings.branding} onChange={updateSettings} themes={themes} currentTheme={currentTheme} setTheme={setTheme} />}
               {activeSection === 'numbering' && <NumberingSettingsForm settings={settings.numbering} onChange={updateSettings} />}
-              {activeSection === 'defaults' && <DefaultsSettingsForm settings={settings.defaults} onChange={updateSettings} />}
+              {activeSection === 'defaults' && (
+                <DefaultsSettingsForm
+                  settings={settings.defaults}
+                  onChange={updateSettings}
+                  onExport={handleExportData}
+                  onImport={handleImportData}
+                  onClear={handleClearData}
+                />
+              )}
+              {activeSection === 'storage' && (
+                <StorageSettingsForm
+                  folder={folder}
+                  backups={backups}
+                  onChooseFolder={handleChooseFolder}
+                  onOpenFolder={handleOpenFolder}
+                  onSaveNow={handleSaveToFolder}
+                  onRefresh={() => void refreshBackups()}
+                  onRestore={handleRestoreFromFolder}
+                  isElectron={Boolean(window.electronAPI?.showOpenDialog)}
+                />
+              )}
             </motion.div>
           </AnimatePresence>
         </motion.main>
@@ -468,7 +604,19 @@ function NumberingSettingsForm({ settings, onChange }: { settings: any; onChange
   )
 }
 
-function DefaultsSettingsForm({ settings, onChange }: { settings: any; onChange: (partial: any) => void }) {
+function DefaultsSettingsForm({
+  settings,
+  onChange,
+  onExport,
+  onImport,
+  onClear,
+}: {
+  settings: any
+  onChange: (partial: any) => void
+  onExport: () => void
+  onImport: () => void
+  onClear: () => void
+}) {
   const update = (field: string, value: any) => onChange({ defaults: { ...settings, [field]: value } })
 
   return (
@@ -518,15 +666,15 @@ function DefaultsSettingsForm({ settings, onChange }: { settings: any; onChange:
           Data Management
         </h3>
         <div className="flex flex-wrap gap-3">
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2" onClick={() => alert('Export functionality to be implemented')}>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2" onClick={onExport}>
             <Download className="w-4 h-4" />
             Export All Data
           </motion.button>
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2" onClick={() => alert('Import functionality to be implemented')}>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2" onClick={onImport}>
             <Upload className="w-4 h-4" />
             Import Data
           </motion.button>
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2 text-error hover:bg-error/10 hover:border-error/30" onClick={() => alert('Clear all data functionality to be implemented')}>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2 text-error hover:bg-error/10 hover:border-error/30" onClick={onClear}>
             <Trash2 className="w-4 h-4" />
             Clear All Data
           </motion.button>
@@ -536,4 +684,101 @@ function DefaultsSettingsForm({ settings, onChange }: { settings: any; onChange:
   )
 }
 
-import { Check } from 'lucide-react'
+function StorageSettingsForm({
+  folder,
+  backups,
+  onChooseFolder,
+  onOpenFolder,
+  onSaveNow,
+  onRefresh,
+  onRestore,
+  isElectron,
+}: {
+  folder: string
+  backups: string[]
+  onChooseFolder: () => void
+  onOpenFolder: () => void
+  onSaveNow: () => void
+  onRefresh: () => void
+  onRestore: (name: string) => void
+  isElectron: boolean
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="glass-elevated p-6 rounded-2xl border border-border-subtle">
+        <h3 className="text-lg font-semibold mb-2 flex items-center gap-2">
+          <Folder className="w-5 h-5" />
+          Local Backup Folder
+        </h3>
+        <p className="text-sm text-text-muted mb-6">
+          Choose a folder for JSON backups of your quotations, price book and settings.
+        </p>
+        {!isElectron && (
+          <p className="mb-4 text-sm text-warning">
+            Folder selection is available in the Electron desktop app. In a browser, use Export / Import instead.
+          </p>
+        )}
+        <div className="p-4 glass-hover rounded-xl border border-border-subtle mb-4">
+          <p className="text-xs text-text-muted mb-1">Selected folder</p>
+          <p className="font-mono text-sm text-text-primary break-all">{folder || 'No folder selected'}</p>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={onChooseFolder} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2">
+            <Folder className="w-4 h-4" />
+            Choose Folder
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={onOpenFolder} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2">
+            <Eye className="w-4 h-4" />
+            Open Folder
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={onSaveNow} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2 bg-primary text-white hover:bg-primary-hover">
+            <Save className="w-4 h-4" />
+            Save Backup Here
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={onRefresh} className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2">
+            <RotateCcw className="w-4 h-4" />
+            Refresh List
+          </motion.button>
+        </div>
+      </div>
+
+      <div className="glass-elevated p-6 rounded-2xl border border-border-subtle">
+        <h3 className="text-lg font-semibold mb-6 flex items-center gap-2">
+          <Database className="w-5 h-5" />
+          Backups in This Folder
+        </h3>
+        {backups.length === 0 ? (
+          <p className="text-sm text-text-muted">No JSON backups found. Save a backup to see it here.</p>
+        ) : (
+          <div className="divide-y divide-border-subtle rounded-xl border border-border-subtle">
+            {backups.map((name) => (
+              <div key={name} className="flex items-center justify-between gap-3 p-3">
+                <span className="text-sm text-text-primary font-mono truncate">{name}</span>
+                <motion.button
+                  whileHover={{ scale: 1.03 }}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => onRestore(name)}
+                  className="glass-hover px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1 shrink-0"
+                  title={`Restore ${name}`}
+                >
+                  <Upload className="w-3 h-3" />
+                  Restore
+                </motion.button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="glass-elevated p-6 rounded-2xl border border-border-subtle">
+        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <Check className="w-5 h-5" />
+          Defaults Reminder
+        </h3>
+        <p className="text-sm text-text-muted">
+          New quotations use 15% Saudi VAT and SAR. Restoring a backup keeps these defaults unless the backup explicitly changes them.
+        </p>
+      </div>
+    </div>
+  )
+}

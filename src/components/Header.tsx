@@ -22,21 +22,6 @@ import {
 import { useStore } from '@/services/store'
 import { useTheme } from '@/hooks/useTheme'
 
-declare global {
-  interface Window {
-    electronAPI?: {
-      minimize: () => void
-      maximize: () => void
-      close: () => void
-      showOpenDialog: (options: any) => Promise<any>
-      showSaveDialog: (options: any) => Promise<any>
-      readFile: (path: string) => Promise<string | null>
-      writeFile: (path: string, content: string) => Promise<boolean>
-      isMaximized: () => Promise<boolean>
-    }
-  }
-}
-
 export function Header() {
   const { currentView, setView, addToast } = useStore()
   const { theme, setTheme, themes } = useTheme()

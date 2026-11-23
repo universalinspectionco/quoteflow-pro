@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { Command as CmdIcon, Search, ArrowUp, ArrowDown, Zap, FileText, Edit, Database, BarChart3, Settings, Sparkles, Stethoscope, Home, Plus, Download, Upload, RotateCcw, Moon, Sun, Keyboard } from 'lucide-react'
 import { useStore } from '@/services/store'
+import { createBackup, parseBackup, pickBackupFile, saveBackup } from '@/services/backup'
 import { useTheme } from '@/hooks/useTheme'
 
 interface CommandItem {
@@ -18,7 +19,19 @@ interface CommandItem {
 }
 
 export function CommandPalette() {
-  const { currentView, setView, addToast } = useStore()
+  const {
+    currentView,
+    setView,
+    addToast,
+    setSelectedQuote,
+    settings,
+    preferences,
+    quotations,
+    priceBook,
+    companies,
+    activeCompanyId,
+    restoreBackup,
+  } = useStore()
   const { theme: currentTheme, setTheme, themes } = useTheme()
   const [isOpen, setIsOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -70,9 +83,34 @@ export function CommandPalette() {
     )
   }, [items, query])
 
+  const handleExport = async () => {
+    const saved = await saveBackup(createBackup({
+      settings, preferences, quotations, priceBook, companies, activeCompanyId,
+    }))
+    addToast(saved
+      ? { type: 'success', title: 'Backup Saved', message: 'JSON backup written successfully' }
+      : { type: 'error', title: 'Backup Cancelled', message: 'No file was written' })
+  }
+
+  const handleImport = async () => {
+    try {
+      const content = await pickBackupFile()
+      if (!content) return
+      restoreBackup(parseBackup(content))
+      addToast({ type: 'success', title: 'Restore Complete', message: 'Backup data restored' })
+    } catch (err) {
+      console.error('Backup restore failed:', err)
+      addToast({
+        type: 'error',
+        title: 'Restore Failed',
+        message: err instanceof Error ? err.message : 'Could not read the backup file',
+      })
+    }
+  }
+
   useEffect(() => {
     const baseItems: CommandItem[] = [
-      { id: 'new-quote', label: 'New Quotation', description: 'Create a new standard or valve quotation', icon: <Plus className="w-4 h-4" />, shortcut: '⌘N', action: () => setView('editor'), keywords: ['new', 'create', 'quote', 'quotation'], category: 'Quotations' },
+      { id: 'new-quote', label: 'New Quotation', description: 'Create a new standard or valve quotation', icon: <Plus className="w-4 h-4" />, shortcut: '⌘N', action: () => { setSelectedQuote(undefined); setView('editor') }, keywords: ['new', 'create', 'quote', 'quotation'], category: 'Quotations' },
       { id: 'view-quotes', label: 'View All Quotations', description: 'Browse and manage all quotations', icon: <FileText className="w-4 h-4" />, shortcut: '⌘1', action: () => setView('quotes'), keywords: ['view', 'list', 'quotes', 'quotations'], category: 'Quotations' },
       { id: 'edit-quote', label: 'Quote Editor', description: 'Open the quotation editor', icon: <Edit className="w-4 h-4" />, shortcut: '⌘3', action: () => setView('editor'), keywords: ['edit', 'editor', 'modify'], category: 'Quotations' },
       { id: 'price-book', label: 'Price Book', description: 'Manage price book items and history', icon: <Database className="w-4 h-4" />, shortcut: '⌘4', action: () => setView('pricebook'), keywords: ['price', 'book', 'rates', 'items'], category: 'Tools' },
@@ -81,14 +119,26 @@ export function CommandPalette() {
       { id: 'ai-studio', label: 'AI Quote Studio', description: 'Generate quotations with AI', icon: <Sparkles className="w-4 h-4" />, shortcut: '⌘6', action: () => setView('ai-studio'), keywords: ['ai', 'artificial', 'intelligence', 'generate', 'smart'], category: 'AI' },
       { id: 'diagnostics', label: 'Diagnostics', description: 'Run system diagnostics and repairs', icon: <Stethoscope className="w-4 h-4" />, shortcut: '⌘7', action: () => setView('diagnostics'), keywords: ['diagnostics', 'health', 'repair', 'check'], category: 'Tools' },
       { id: 'settings', label: 'Settings', description: 'Configure application settings', icon: <Settings className="w-4 h-4" />, shortcut: '⌘8', action: () => setView('settings'), keywords: ['settings', 'preferences', 'config', 'options'], category: 'Settings' },
-      { id: 'export', label: 'Export Data', description: 'Export all data as backup', icon: <Download className="w-4 h-4" />, shortcut: '⌘E', action: () => addToast({ type: 'info', title: 'Export Started', message: 'Preparing data export...' }), keywords: ['export', 'backup', 'download', 'save'], category: 'Data' },
-      { id: 'import', label: 'Import Data', description: 'Import data from backup', icon: <Upload className="w-4 h-4" />, shortcut: '⌘I', action: () => addToast({ type: 'info', title: 'Import Ready', message: 'Select file to import...' }), keywords: ['import', 'restore', 'upload', 'load'], category: 'Data' },
+      { id: 'export', label: 'Export Data', description: 'Export all data as a JSON backup', icon: <Download className="w-4 h-4" />, shortcut: '⌘E', action: () => void handleExport(), keywords: ['export', 'backup', 'download', 'save'], category: 'Data' },
+      { id: 'import', label: 'Import Data', description: 'Restore data from a JSON backup', icon: <Upload className="w-4 h-4" />, shortcut: '⌘I', action: () => void handleImport(), keywords: ['import', 'restore', 'upload', 'load'], category: 'Data' },
       { id: 'toggle-theme', label: currentTheme === 'arctic' ? 'Switch to Dark Mode' : 'Switch to Light Mode', description: 'Toggle between light and dark theme', icon: currentTheme === 'arctic' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />, shortcut: '⌘T', action: () => { const next = themes.find((t) => t.id === 'arctic') ? 'glass' : 'arctic'; setTheme(next) }, keywords: ['theme', 'dark', 'light', 'mode', 'appearance'], category: 'Appearance' },
       { id: 'refresh', label: 'Refresh Data', description: 'Reload all data from storage', icon: <RotateCcw className="w-4 h-4" />, shortcut: '⌘R', action: () => addToast({ type: 'success', title: 'Refreshed', message: 'Data reloaded successfully' }), keywords: ['refresh', 'reload', 'sync', 'update'], category: 'Data' },
     ]
     setItems(baseItems)
     setSelectedIndex(0)
-  }, [currentView, currentTheme, themes])
+  }, [
+    currentView,
+    currentTheme,
+    themes,
+    settings,
+    preferences,
+    quotations,
+    priceBook,
+    companies,
+    activeCompanyId,
+    restoreBackup,
+    addToast,
+  ])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     const filtered = filteredItems

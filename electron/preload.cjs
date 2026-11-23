@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close: () => ipcRenderer.invoke('app:close'),
 
   showOpenDialog: (options) => ipcRenderer.invoke('dialog:showOpen', options),
+  showOpenFolder: (options) => ipcRenderer.invoke('dialog:showOpenFolder', options),
   showSaveDialog: (options) => ipcRenderer.invoke('dialog:showSave', options),
   showMessageBox: (options) => ipcRenderer.invoke('dialog:showMessage', options),
 
@@ -17,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openPath: (path) => ipcRenderer.invoke('shell:openPath', path),
 
   readFile: (path) => ipcRenderer.invoke('fs:readFile', path),
+  readFileBase64: (path) => ipcRenderer.invoke('fs:readFileBase64', path),
   writeFile: (path, content) => ipcRenderer.invoke('fs:writeFile', path, content),
   exists: (path) => ipcRenderer.invoke('fs:exists', path),
   mkdir: (path) => ipcRenderer.invoke('fs:mkdir', path),

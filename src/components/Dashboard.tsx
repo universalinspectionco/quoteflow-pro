@@ -24,16 +24,20 @@ const statCards = [
   { id: 'clients', label: 'Active Clients', icon: Users, color: 'from-accent to-rose-400', trend: '+8', trendLabel: 'new this month' },
 ] as const
 
-const recentActivity = [
-  { id: 1, type: 'quote_created', title: 'New quotation created', subtitle: 'UIC-Q-1042 for Al Maktoum Industries', time: '2 hours ago', status: 'draft' },
-  { id: 2, type: 'quote_sent', title: 'Quotation sent', subtitle: 'UIC-Q-1038 to Dubai Petroleum', time: '5 hours ago', status: 'sent' },
-  { id: 3, type: 'quote_approved', title: 'Quotation approved', subtitle: 'UIC-Q-1025 by Emirates Steel', time: '1 day ago', status: 'approved' },
-  { id: 4, type: 'quote_rejected', title: 'Quotation needs revision', subtitle: 'UIC-Q-1012 rejected by ADNOC', time: '2 days ago', status: 'rejected' },
-  { id: 5, type: 'price_updated', title: 'Price book updated', subtitle: 'Valve items rates revised', time: '3 days ago', status: 'info' },
-]
+function relativeTime(iso: string): string {
+  const timestamp = new Date(iso).getTime()
+  if (!Number.isFinite(timestamp)) return 'Recently'
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000))
+  if (minutes < 1) return 'Just now'
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  const days = Math.round(hours / 24)
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
 
 export function Dashboard() {
-  const { quotations, settings, setView } = useStore()
+  const { quotations, settings, setView, setSelectedQuote } = useStore()
 
   const stats = {
     totalQuotes: quotations.length,
@@ -41,7 +45,7 @@ export function Dashboard() {
     conversionRate: quotations.length > 0
       ? ((quotations.filter(q => q.status === 'approved').length / quotations.length) * 100).toFixed(1)
       : '0.0',
-    activeClients: new Set(quotations.map(q => q.client.id)).size,
+    activeClients: new Set(quotations.map(q => q.client?.id).filter(Boolean)).size,
   }
 
   const statusCounts = {
@@ -52,7 +56,22 @@ export function Dashboard() {
     expired: quotations.filter(q => q.status === 'expired').length,
   }
 
-  const recentQuotes = [...quotations].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 5)
+  const recentQuotes = [...quotations]
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .slice(0, 5)
+
+  const recentActivity = recentQuotes.map((quote) => ({
+    id: quote.id,
+    title:
+      quote.status === 'approved' ? 'Quotation approved' :
+      quote.status === 'sent' ? 'Quotation sent' :
+      quote.status === 'rejected' ? 'Quotation needs revision' :
+      quote.status === 'expired' ? 'Quotation expired' :
+      'Quotation created',
+    subtitle: `${quote.quoteNumber} · ${quote.client?.name || 'Unknown client'}`,
+    time: relativeTime(quote.updatedAt),
+    status: quote.status,
+  }))
 
   return (
     <div className="space-y-6 animate-in">
@@ -70,7 +89,7 @@ export function Dashboard() {
         <motion.button
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
-          onClick={() => setView('editor')}
+          onClick={() => { setSelectedQuote(undefined); setView('editor') }}
           className="flex items-center gap-2 glass-hover px-4 py-2 rounded-xl font-medium self-end sm:self-auto"
         >
           <Plus className="w-4 h-4" />
@@ -95,7 +114,7 @@ export function Dashboard() {
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-text-muted text-sm font-medium">{card.label}</p>
-                <p className="text-3xl font-bold mt-1 bg-gradient-to-r {card.color} bg-clip-text text-transparent">
+                <p className={`text-3xl font-bold mt-1 bg-gradient-to-r ${card.color} bg-clip-text text-transparent`}>
                   {card.id === 'total-quotes' && stats.totalQuotes}
                   {card.id === 'revenue' && formatCurrency(stats.totalRevenue, settings.defaults.currency)}
                   {card.id === 'conversion' && `${stats.conversionRate}%`}
@@ -145,7 +164,7 @@ export function Dashboard() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.2 + index * 0.05 }}
                   className="p-5 hover:bg-bg-secondary transition-colors cursor-pointer group"
-                  onClick={() => { setView('editor'); }}
+                  onClick={() => { setSelectedQuote(quote.id); setView('editor'); }}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
@@ -160,7 +179,7 @@ export function Dashboard() {
                       </div>
                       <div>
                         <p className="font-medium text-text-primary">{quote.quoteNumber}</p>
-                        <p className="text-sm text-text-muted">{quote.client.name} • {formatDate(quote.date)}</p>
+                        <p className="text-sm text-text-muted">{quote.client?.name || 'Unknown client'} • {formatDate(quote.date)}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
@@ -186,7 +205,7 @@ export function Dashboard() {
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  onClick={() => setView('editor')}
+                  onClick={() => { setSelectedQuote(undefined); setView('editor') }}
                   className="glass-hover px-6 py-2 rounded-xl font-medium inline-flex items-center gap-2"
                 >
                   <Plus className="w-4 h-4" />
@@ -266,13 +285,13 @@ export function Dashboard() {
                 activity.status === 'approved' ? 'bg-success/20 text-success' :
                 activity.status === 'rejected' ? 'bg-error/20 text-error' :
                 activity.status === 'sent' ? 'bg-primary/20 text-primary' :
-                activity.status === 'info' ? 'bg-secondary/20 text-secondary' :
+                activity.status === 'expired' ? 'bg-secondary/20 text-secondary' :
                 'bg-warning/20 text-warning'
               }`}>
                 {activity.status === 'approved' && <CheckCircle className="w-5 h-5" />}
                 {activity.status === 'rejected' && <XCircle className="w-5 h-5" />}
                 {activity.status === 'sent' && <ArrowUpRight className="w-5 h-5" />}
-                {activity.status === 'info' && <FileText className="w-5 h-5" />}
+                {activity.status === 'expired' && <AlertTriangle className="w-5 h-5" />}
                 {activity.status === 'draft' && <FileText className="w-5 h-5" />}
               </div>
               <div className="flex-1 min-w-0">

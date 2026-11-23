@@ -197,6 +197,14 @@ ipcMain.handle('dialog:showOpen', async (_, options) => {
   const result = await dialog.showOpenDialog(mainWindow, options)
   return result
 })
+ipcMain.handle('dialog:showOpenFolder', async (_, options = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a folder',
+    ...options,
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  return result
+})
 ipcMain.handle('dialog:showSave', async (_, options) => {
   const result = await dialog.showSaveDialog(mainWindow, options)
   return result
@@ -214,6 +222,13 @@ ipcMain.handle('shell:openPath', async (_, path) => {
 ipcMain.handle('fs:readFile', async (_, path) => {
   try {
     return readFileSync(path, 'utf8')
+  } catch {
+    return null
+  }
+})
+ipcMain.handle('fs:readFileBase64', async (_, path) => {
+  try {
+    return readFileSync(path).toString('base64')
   } catch {
     return null
   }

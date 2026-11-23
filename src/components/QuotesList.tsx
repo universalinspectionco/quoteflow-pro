@@ -27,143 +27,197 @@ import {
   CheckCircle,
   AlertCircle,
 } from 'lucide-react'
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { useStore } from '@/services/store'
-import { generateId } from '@/utils/formatters'
 import { formatCurrency, formatDate } from '@/utils/formatters'
-
-declare global {
-  interface Window {
-    electronAPI?: {
-      minimize: () => void
-      maximize: () => void
-      close: () => void
-      showOpenDialog: (options: any) => Promise<any>
-      showSaveDialog: (options: any) => Promise<any>
-      readFile: (path: string) => Promise<string | null>
-      writeFile: (path: string, content: string) => Promise<boolean>
-      isMaximized: () => Promise<boolean>
-    }
-  }
-}
+import {
+  importedHeaderPreview,
+  normalizeImportedQuotation,
+  readQuotationImportRows,
+} from '@/utils/quotationImport'
+import type { ImportSource } from '@/utils/quotationImport'
+import { exportQuotationsToExcel, exportQuotationsToPdf } from '@/utils/quotationExport'
+import type { Quotation } from '@/types'
 
 const statusOptions = ['all', 'draft', 'sent', 'approved', 'rejected', 'expired'] as const
 const typeOptions = ['all', 'standard', 'valve'] as const
 
 export function QuotesList() {
-  const { quotations, setView, setSelectedQuote, deleteQuotation, addToast, settings, addQuotation } = useStore()
+  const {
+    quotations,
+    setView,
+    setSelectedQuote,
+    deleteQuotation,
+    duplicateQuotation,
+    updateQuotation,
+    setQuotations,
+    addToast,
+    settings,
+    companies,
+  } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'sent' | 'approved' | 'rejected' | 'expired'>('all')
   const [typeFilter, setTypeFilter] = useState<'all' | 'standard' | 'valve'>('all')
-  const [sortField, setSortField] = useState<'date' | 'quoteNumber' | 'client' | 'total' | 'status'>('date')
+  const [sortField, setSortField] = useState<'date' | 'quoteNumber' | 'client' | 'type' | 'total' | 'status'>('date')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
   const [currentPage, setCurrentPage] = useState(1)
   const [selectedQuotes, setSelectedQuotes] = useState<string[]>([])
   const itemsPerPage = 10
 
-  // Quotation Import functionality
+  // Quotation import state — supports JSON, CSV, Excel and PDF.
+  type ImportStatus = 'idle' | 'reading' | 'importing' | 'complete' | 'error'
   const [showImportDialog, setShowImportDialog] = useState(false)
-  const [importFile, setImportFile] = useState<string | null>(null)
+  const [importSource, setImportSource] = useState<ImportSource | null>(null)
+  const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
   const [importProgress, setImportProgress] = useState(0)
-  type ImportStatus = "idle" | "importing" | "complete" | "error"
-  const [importStatus, setImportStatus] = useState<ImportStatus>("idle")
+  const [importStatus, setImportStatus] = useState<ImportStatus>('idle')
+  const [importError, setImportError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const parseFilePreview = async (filePath: string) => {
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, statusFilter, typeFilter, sortField, sortOrder])
+
+  const currency = settings.defaults.currency || 'SAR'
+  const companyName = companies.find((c) => c.id === companies[0]?.id)?.name ||
+    settings.company.name ||
+    'Universal Inspection Co. Ltd.'
+
+  const loadImportSource = async (source: ImportSource) => {
+    setImportSource(source)
+    setImportRows([])
+    setImportProgress(0)
+    setImportError('')
+    setImportStatus('reading')
     try {
-      const { readFile } = window.electronAPI || {}
-      if (!readFile) throw new Error("File reading not available")
-      const content = await readFile(filePath)
-      if (!content) throw new Error("Could not read file")
-      if (filePath.endsWith('.json')) {
-        const data = JSON.parse(content)
-        if (Array.isArray(data)) return { headers: Object.keys(data[0] || {}) }
-        return { headers: Object.keys(data) }
-      } else if (filePath.endsWith('.csv')) {
-        const lines = content.split('\n')
-        const headers = lines[0].split(',').map(h => h.trim())
-        return { headers, preview: lines.slice(1, 5) }
-      }
-      return { headers: [] }
+      const rows = await readQuotationImportRows(source)
+      if (rows.length === 0) throw new Error('No data rows were found in the selected file')
+      setImportRows(rows)
+      setImportStatus('idle')
     } catch (err) {
-      console.error("File preview error:", err)
-      return { headers: [] }
+      console.error('Quotation import preview failed:', err)
+      setImportError(err instanceof Error ? err.message : 'Could not read the selected file')
+      setImportStatus('error')
     }
   }
 
+  const handleElectronImportFile = async () => {
+    const result = await window.electronAPI?.showOpenDialog({
+      title: 'Import Quotations',
+      filters: [
+        { name: 'All Supported', extensions: ['json', 'xlsx', 'xls', 'csv', 'pdf'] },
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'Excel', extensions: ['xlsx', 'xls'] },
+        { name: 'CSV', extensions: ['csv'] },
+        { name: 'PDF', extensions: ['pdf'] },
+      ],
+      properties: ['openFile'],
+    })
+    if (result?.canceled || !result?.filePaths?.length) return
+    const path = result.filePaths[0]
+    await loadImportSource({ kind: 'path', path, name: path.split(/[\\/]/).pop() || path })
+  }
+
+  const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (file) void loadImportSource({ kind: 'file', file, name: file.name })
+    event.target.value = ''
+  }
+
   const handleImportFile = async () => {
-    if (!importFile) return
+    if (importRows.length === 0) return
     try {
-      setImportProgress(10)
-      setImportStatus("importing")
-      const { readFile } = window.electronAPI || {}
-      if (!readFile) throw new Error("File reading not available")
-      setImportProgress(30)
-      const content = await readFile(importFile)
-      if (!content) throw new Error("Could not read file")
-      setImportProgress(50)
-      let data: any = null
-      if (importFile.endsWith('.json')) {
-        data = JSON.parse(content)
-      } else if (importFile.endsWith('.csv')) {
-        const lines = content.split('\n').filter(l => l.trim())
-        const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''))
-        data = lines.slice(1).map(line => {
-          const values = line.split(',').map(v => v.trim().replace(/"/g, ''))
-          const obj: Record<string, string> = {}
-          headers.forEach((h, i) => { obj[h] = values[i] || '' })
-          return obj
-        })
-      }
+      setImportStatus('importing')
+      setImportProgress(20)
+      const imported = importRows
+        .map((row, index) => normalizeImportedQuotation(row, { settings, index }))
+        .filter((quote): quote is Quotation => quote !== null)
+      if (imported.length === 0) throw new Error('No valid quotations were found in the selected file')
       setImportProgress(70)
-      if (Array.isArray(data)) {
-        // Import quotations
-        for (const item of data) {
-          if (item.quoteNumber && item.client) {
-            addQuotation({
-              id: generateId(),
-              type: item.type || "standard",
-              quoteNumber: item.quoteNumber,
-              date: item.date,
-              client: item.client,
-              items: item.items || [],
-              subtotal: item.subtotal || 0,
-              tax: item.tax || 0,
-              total: item.total || 0,
-              status: item.status || "draft",
-              notes: item.notes || "",
-              terms: item.terms || settings.defaults.paymentTerms,
-              serialNumber: item.serialNumber || "",
-              annexurePages: item.annexurePages || [],
-              createdAt: item.createdAt || new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            })
-          }
-        }
-        addToast({ type: "success", title: "Imported", message: `${data.length} quotations imported` })
-      }
+      // One store write keeps bulk imports fast and avoids renumbering every row.
+      setQuotations([...imported, ...quotations])
       setImportProgress(100)
-      setImportStatus("complete")
+      setImportStatus('complete')
+      addToast({
+        type: 'success',
+        title: 'Imported',
+        message: `${imported.length} quotation${imported.length === 1 ? '' : 's'} imported`,
+      })
     } catch (err) {
-      console.error("Import error:", err)
-      setImportStatus("error")
-      addToast({ type: "error", title: "Import Failed", message: "Could not import file. Please check format." })
+      console.error('Quotation import failed:', err)
+      setImportError(err instanceof Error ? err.message : 'Could not import the selected file')
+      setImportStatus('error')
+      addToast({ type: 'error', title: 'Import Failed', message: 'Please check the file format and try again.' })
     }
+  }
+
+  const resetImport = () => {
+    setShowImportDialog(false)
+    setImportSource(null)
+    setImportRows([])
+    setImportProgress(0)
+    setImportStatus('idle')
+    setImportError('')
   }
 
   const handleImportQuotations = () => {
     setShowImportDialog(true)
-    setImportFile(null)
+    setImportSource(null)
+    setImportRows([])
     setImportProgress(0)
-    setImportStatus("idle")
+    setImportStatus('idle')
+    setImportError('')
+  }
+
+  const quotesForExport = (): Quotation[] => {
+    const byId = new Set(selectedQuotes)
+    return byId.size > 0 ? quotations.filter((quote) => byId.has(quote.id)) : filteredQuotes
+  }
+
+  const handleExportExcel = async () => {
+    const quotes = quotesForExport()
+    if (quotes.length === 0) return
+    try {
+      await exportQuotationsToExcel(quotes)
+      addToast({ type: 'success', title: 'Exported', message: `${quotes.length} quotation(s) exported to Excel` })
+    } catch (err) {
+      console.error('Excel export failed:', err)
+      addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the Excel file.' })
+    }
+  }
+
+  const handleExportPdf = async () => {
+    const quotes = quotesForExport()
+    if (quotes.length === 0) return
+    try {
+      await exportQuotationsToPdf(quotes, currency, companyName)
+      addToast({ type: 'success', title: 'Exported', message: `${quotes.length} quotation(s) exported to PDF` })
+    } catch (err) {
+      console.error('PDF export failed:', err)
+      addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the PDF file.' })
+    }
   }
 
   const filteredQuotes = useMemo(() => {
     return quotations
       .filter((q) => {
-        const matchesSearch =
-          q.quoteNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          q.client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          q.client.email?.toLowerCase().includes(searchQuery.toLowerCase())
+        const needle = searchQuery.trim().toLowerCase()
+        const haystack = [
+          q.quoteNumber,
+          q.title,
+          q.ref,
+          q.poNumber,
+          q.client?.name,
+          q.client?.company,
+          q.client?.email,
+          q.client?.contactPerson,
+          ...(q.items || []).map((item) => item.description),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+        const matchesSearch = !needle || haystack.includes(needle)
         const matchesStatus = statusFilter === 'all' || q.status === statusFilter
         const matchesType = typeFilter === 'all' || q.type === typeFilter
         return matchesSearch && matchesStatus && matchesType
@@ -171,28 +225,35 @@ export function QuotesList() {
       .sort((a, b) => {
         let aVal: string | number
         let bVal: string | number
-        if (sortField === 'date') {
-          aVal = new Date(a.date).getTime()
-          bVal = new Date(b.date).getTime()
-        } else if (sortField === 'quoteNumber') {
-          aVal = a.quoteNumber
-          bVal = b.quoteNumber
-        } else if (sortField === 'client') {
-          aVal = a.client.name.toLowerCase()
-          bVal = b.client.name.toLowerCase()
-        } else if (sortField === 'total') {
-          aVal = a.total
-          bVal = b.total
-        } else if (sortField === 'status') {
-          aVal = a.status
-          bVal = b.status
-        } else {
-          aVal = a[sortField as keyof typeof a] as string | number
-          bVal = b[sortField as keyof typeof b] as string | number
+        switch (sortField) {
+          case 'date':
+            aVal = new Date(a.date).getTime() || 0
+            bVal = new Date(b.date).getTime() || 0
+            break
+          case 'quoteNumber':
+            aVal = a.quoteNumber.toLowerCase()
+            bVal = b.quoteNumber.toLowerCase()
+            break
+          case 'client':
+            aVal = (a.client?.name || '').toLowerCase()
+            bVal = (b.client?.name || '').toLowerCase()
+            break
+          case 'type':
+            aVal = a.type
+            bVal = b.type
+            break
+          case 'total':
+            aVal = Number.isFinite(a.total) ? a.total : 0
+            bVal = Number.isFinite(b.total) ? b.total : 0
+            break
+          case 'status':
+          default:
+            aVal = a.status
+            bVal = b.status
+            break
         }
-        if (sortOrder === 'asc') {
-          return aVal > bVal ? 1 : -1
-        }
+        if (aVal === bVal) return 0
+        if (sortOrder === 'asc') return aVal > bVal ? 1 : -1
         return aVal < bVal ? 1 : -1
       })
   }, [quotations, searchQuery, statusFilter, typeFilter, sortField, sortOrder])
@@ -226,10 +287,6 @@ export function QuotesList() {
     selectedQuotes.forEach((id) => deleteQuotation(id))
     setSelectedQuotes([])
     addToast({ type: 'success', title: 'Deleted', message: `${selectedQuotes.length} quotation(s) removed` })
-  }
-
-  const handleBulkExport = () => {
-    addToast({ type: 'info', title: 'Export Started', message: `Exporting ${selectedQuotes.length} quotation(s)...` })
   }
 
   const statusColors: Record<string, string> = {
@@ -268,11 +325,22 @@ export function QuotesList() {
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
-                onClick={handleBulkExport}
+                onClick={handleExportExcel}
                 className="text-sm text-primary hover:text-primary-hover font-medium flex items-center gap-1"
+                title="Export selected quotations to Excel"
               >
                 <Download className="w-3 h-3" />
-                Export
+                Excel
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleExportPdf}
+                className="text-sm text-primary hover:text-primary-hover font-medium flex items-center gap-1"
+                title="Export selected quotations to PDF"
+              >
+                <Download className="w-3 h-3" />
+                PDF
               </motion.button>
               <motion.button
                 whileHover={{ scale: 1.05 }}
@@ -296,7 +364,7 @@ export function QuotesList() {
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
-            onClick={() => setView('editor')}
+            onClick={() => { setSelectedQuote(undefined); setView('editor') }}
             className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
@@ -310,6 +378,26 @@ export function QuotesList() {
           >
             <Upload className="w-4 h-4" />
             Import
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={handleExportExcel}
+            className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2"
+            title="Export all filtered quotations to Excel"
+          >
+            <Download className="w-4 h-4" />
+            Excel
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={handleExportPdf}
+            className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2"
+            title="Export all filtered quotations to PDF"
+          >
+            <Download className="w-4 h-4" />
+            PDF
           </motion.button>
         </div>
       </motion.div>
@@ -368,25 +456,29 @@ export function QuotesList() {
                     aria-label="Select all"
                   />
                 </th>
-                {[
-                  { key: 'number', label: 'Quote #', field: 'number' },
+                {([
+                  { key: 'number', label: 'Quote #', field: 'quoteNumber' },
                   { key: 'date', label: 'Date', field: 'date' },
                   { key: 'client', label: 'Client', field: 'client' },
                   { key: 'type', label: 'Type', field: 'type' },
                   { key: 'total', label: 'Total', field: 'total' },
                   { key: 'status', label: 'Status', field: 'status' },
-                ].map((col) => (
+                ] as { key: string; label: string; field: typeof sortField }[]).map((col) => (
                   <th
                     key={col.key}
-                    onClick={() => handleSort(col.field as typeof sortField)}
-                    className="px-4 py-3 text-left text-sm font-medium text-text-secondary hover:text-text-primary cursor-pointer select-none flex items-center gap-1"
+                    onClick={() => handleSort(col.field)}
+                    className="px-4 py-3 text-left text-sm font-medium text-text-secondary hover:text-text-primary cursor-pointer select-none whitespace-nowrap"
+                    aria-label={`Sort by ${col.label}`}
                   >
-                    {col.label}
-                    {sortField === col.field && (
-                      <ArrowUpDown className={`w-4 h-4 ${sortOrder === 'asc' ? 'rotate-180' : ''}`} />
-                    )}
+                    <span className="inline-flex items-center gap-1">
+                      {col.label}
+                      {sortField === col.field && (
+                        <ArrowUpDown className={`w-4 h-4 ${sortOrder === 'asc' ? 'rotate-180' : ''}`} />
+                      )}
+                    </span>
                   </th>
                 ))}
+                <th className="px-4 py-3 text-left text-sm font-medium text-text-secondary whitespace-nowrap">Follow-up</th>
                 <th className="w-16 px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
@@ -437,10 +529,27 @@ export function QuotesList() {
                         {formatCurrency(quote.total, settings.defaults.currency)}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${statusColors[quote.status]}`}>
-                          {statusIcons[quote.status]}
-                          {quote.status.charAt(0).toUpperCase() + quote.status.slice(1)}
-                        </span>
+                        <select
+                          value={quote.status}
+                          onChange={(e) => updateQuotation(quote.id, { status: e.target.value as Quotation['status'] })}
+                          className={`px-2 py-1 rounded-lg text-xs font-medium border bg-transparent focus-ring ${statusColors[quote.status] || ''}`}
+                          aria-label={`Status for ${quote.quoteNumber}`}
+                        >
+                          {statusOptions.filter((status) => status !== 'all').map((status) => (
+                            <option key={status} value={status}>
+                              {status.charAt(0).toUpperCase() + status.slice(1)}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-4 py-3">
+                        <input
+                          type="date"
+                          value={quote.followUpDate || ''}
+                          onChange={(e) => updateQuotation(quote.id, { followUpDate: e.target.value || undefined })}
+                          className="glass-hover px-2 py-1 rounded-lg text-xs text-text-secondary focus-ring bg-transparent border border-border-subtle"
+                          aria-label={`Follow-up date for ${quote.quoteNumber}`}
+                        />
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -456,7 +565,10 @@ export function QuotesList() {
                           <motion.button
                             whileHover={{ scale: 1.1 }}
                             whileTap={{ scale: 0.9 }}
-                            onClick={() => { setSelectedQuote(quote.id); setView('editor') }}
+                            onClick={() => {
+                              duplicateQuotation(quote.id)
+                              addToast({ type: 'success', title: 'Duplicated', message: `${quote.quoteNumber} copied as a new draft` })
+                            }}
                             className="glass-hover p-2 rounded-xl text-text-secondary hover:text-secondary focus-ring"
                             aria-label={`Duplicate ${quote.quoteNumber}`}
                           >
@@ -488,7 +600,7 @@ export function QuotesList() {
                       <motion.button
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
-                        onClick={() => setView('editor')}
+                        onClick={() => { setSelectedQuote(undefined); setView('editor') }}
                         className="glass-hover px-6 py-2 rounded-xl font-medium inline-flex items-center gap-2"
                       >
                         <Plus className="w-4 h-4" />
@@ -551,6 +663,14 @@ export function QuotesList() {
       </motion.div>
 
       {/* Import Quotations Dialog */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,.csv,.txt,.xlsx,.xls,.pdf"
+        onChange={handleFileInput}
+        className="hidden"
+        aria-label="Choose quotation import file"
+      />
       <AnimatePresence>
         {showImportDialog && (
           <motion.div
@@ -558,7 +678,7 @@ export function QuotesList() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
-            onClick={() => setShowImportDialog(false)}
+            onClick={resetImport}
             role="dialog"
             aria-modal="true"
             aria-label="Import Quotations"
@@ -576,130 +696,131 @@ export function QuotesList() {
                 <motion.button
                   whileHover={{ scale: 1.1 }}
                   whileTap={{ scale: 0.9 }}
-                  onClick={() => { setShowImportDialog(false); setImportFile(null); setImportProgress(0); setImportStatus("idle"); }}
+                  onClick={resetImport}
                   className="glass-hover p-2 rounded-xl focus-ring"
+                  aria-label="Close import dialog"
                 >
                   <X className="w-5 h-5" />
                 </motion.button>
               </div>
 
               <div className="p-6 overflow-y-auto flex-1">
-                {!importFile ? (
+                {importStatus === 'reading' ? (
+                  <div className="text-center py-12">
+                    <Loader2 className="w-10 h-10 mx-auto text-primary animate-spin mb-4" />
+                    <p className="font-medium text-text-primary">Reading file...</p>
+                    <p className="text-sm text-text-muted mt-1">{importSource?.name}</p>
+                  </div>
+                ) : !importSource || importRows.length === 0 ? (
                   <div className="space-y-6">
                     <div>
                       <h4 className="font-medium text-text-primary mb-3">Select Import File</h4>
-                      <div className="glass-hover border-2 border-dashed border-border-subtle rounded-xl p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
-                           onClick={async () => {
-                             if (typeof window !== 'undefined' && window.electronAPI) {
-                               const result = await window.electronAPI.showOpenDialog({
-                                 filters: [
-                                   { name: 'All Supported', extensions: ['json', 'xlsx', 'csv'] },
-                                   { name: 'JSON', extensions: ['json'] },
-                                   { name: 'Excel', extensions: ['xlsx', 'xls'] },
-                                   { name: 'CSV', extensions: ['csv'] },
-                                 ],
-                                 properties: ['openFile'],
-                               })
-                               if (!result.canceled && result.filePaths.length > 0) {
-                                 setImportFile(result.filePaths[0])
-                               }
-                             }
-                           }}>
+                      <div
+                        className="glass-hover border-2 border-dashed border-border-subtle rounded-xl p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
+                        onClick={() => {
+                          if (window.electronAPI?.showOpenDialog) void handleElectronImportFile()
+                          else fileInputRef.current?.click()
+                        }}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          const file = e.dataTransfer.files?.[0]
+                          if (file) void loadImportSource({ kind: 'file', file, name: file.name })
+                        }}
+                      >
                         <FileInput className="w-12 h-12 mx-auto text-text-muted mb-4" />
-                        <p className="text-text-secondary mb-2">Click to select file or drag and drop</p>
-                        <p className="text-xs text-text-muted">Supports: JSON, Excel (.xlsx), CSV</p>
+                        <p className="text-text-secondary mb-2">Click to select a file or drag and drop</p>
+                        <p className="text-xs text-text-muted">
+                          Supports JSON, CSV, Excel (.xlsx/.xls) and PDF
+                        </p>
                       </div>
+                      {importError && (
+                        <p className="mt-3 text-sm text-error flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4" />
+                          {importError}
+                        </p>
+                      )}
                     </div>
                   </div>
-                ) : importStatus === "idle" ? (
+                ) : (
                   <div className="space-y-6">
-                    <div className="flex items-center justify-between p-4 glass-hover rounded-xl">
-                      <div className="flex items-center gap-3">
-                        <FileInput className="w-8 h-8 text-primary" />
-                        <div>
-                          <p className="font-medium text-text-primary">{importFile}</p>
-                          <p className="text-xs text-text-muted">Quotation File</p>
-                        </div>
+                    <div className="flex items-center justify-between p-4 glass-hover rounded-xl gap-3">
+                      <div className="min-w-0">
+                        <p className="font-medium text-text-primary truncate">{importSource.name}</p>
+                        <p className="text-xs text-text-muted">
+                          {importRows.length} row{importRows.length === 1 ? '' : 's'} detected ·{' '}
+                          {importedHeaderPreview(importRows).slice(0, 8).join(', ') || 'no columns'}
+                        </p>
                       </div>
                       <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
-                        onClick={() => { setImportFile(null); setImportProgress(0); setImportStatus("idle"); }}
-                        className="glass-hover px-3 py-1.5 rounded-lg text-sm text-text-secondary hover:text-error"
+                        onClick={() => { setImportSource(null); setImportRows([]); setImportError(''); setImportStatus('idle') }}
+                        className="glass-hover px-3 py-1.5 rounded-lg text-sm text-text-secondary hover:text-error shrink-0"
                       >
                         <X className="w-4 h-4 mr-1" />
                         Remove
                       </motion.button>
                     </div>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={async () => {
-                        setImportStatus("importing")
-                        setImportProgress(0)
-                        await handleImportFile()
-                      }}
-                      className="w-full glass-hover p-4 rounded-xl border-2 border-border-subtle hover:border-primary/50 transition-colors"
-                    >
-                      {importStatus === "importing" as ImportStatus ? (
-                        <>
-                          <Loader2 className="w-6 h-6 mx-auto text-primary mb-2 animate-spin" />
-                          <p className="font-medium text-text-primary">Importing...</p>
-                        </>
-                      ) : (
-                        <>
-                          <FileInput className="w-6 h-6 mx-auto text-primary mb-2" />
-                          <p className="font-medium text-text-primary">Import Quotations</p>
-                          <p className="text-xs text-text-muted mt-1">Auto-detect and import</p>
-                        </>
-                      )}
-                    </motion.button>
-                    {importStatus === "importing" as ImportStatus && (
-                      <div className="space-y-2">
-                        <p className="text-sm text-text-muted">Processing quotations...</p>
-                        <div className="w-full bg-bg-tertiary rounded-full h-2 overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{ width: `${importProgress}%` }}
-                            className="h-full bg-primary rounded-full"
-                            transition={{ duration: 0.3 }}
-                          />
-                        </div>
-                        <p className="text-sm text-text-muted">{importProgress}% complete</p>
-                      </div>
-                    )}
-                    {importStatus === "complete" as ImportStatus && (
+
+                    {importStatus === 'complete' ? (
                       <div className="space-y-4 text-center">
                         <CheckCircle className="w-16 h-16 mx-auto text-success" />
                         <p className="font-medium text-text-primary">Import Complete!</p>
-                        <p className="text-sm text-text-muted">Quotations imported successfully</p>
+                        <p className="text-sm text-text-muted">Quotations imported successfully with 15% VAT in SAR.</p>
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
-                          onClick={() => { setShowImportDialog(false); setImportFile(null); setImportProgress(0); setImportStatus("idle"); }}
+                          onClick={resetImport}
                           className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 bg-primary text-white hover:bg-primary-hover"
                         >
                           Done
                         </motion.button>
                       </div>
-                    )}
-                    {importStatus === "error" as ImportStatus && (
+                    ) : importStatus === 'error' ? (
                       <div className="space-y-4 text-center">
                         <AlertCircle className="w-16 h-16 mx-auto text-error" />
                         <p className="font-medium text-text-primary">Import Failed</p>
-                        <p className="text-sm text-text-muted">An error occurred during import</p>
+                        <p className="text-sm text-text-muted">{importError || 'An error occurred during import'}</p>
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
-                          onClick={() => setImportStatus("idle")}
+                          onClick={() => { setImportError(''); setImportStatus('idle') }}
                           className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 text-error hover:bg-error/10 hover:border-error/30"
                         >
                           Try Again
                         </motion.button>
                       </div>
+                    ) : (
+                      <>
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => void handleImportFile()}
+                          className="w-full glass-hover p-4 rounded-xl border-2 border-border-subtle hover:border-primary/50 transition-colors"
+                        >
+                          <FileInput className="w-6 h-6 mx-auto text-primary mb-2" />
+                          <p className="font-medium text-text-primary">Import Quotations</p>
+                          <p className="text-xs text-text-muted mt-1">Auto-detect and import</p>
+                        </motion.button>
+                        {importStatus === 'importing' && (
+                          <div className="space-y-2">
+                            <p className="text-sm text-text-muted">Processing quotations...</p>
+                            <div className="w-full bg-bg-tertiary rounded-full h-2 overflow-hidden">
+                              <motion.div
+                                initial={{ width: 0 }}
+                                animate={{ width: `${importProgress}%` }}
+                                className="h-full bg-primary rounded-full"
+                                transition={{ duration: 0.3 }}
+                              />
+                            </div>
+                            <p className="text-sm text-text-muted">{importProgress}% complete</p>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
-                ) : null}
+                )}
               </div>
             </motion.div>
           </motion.div>

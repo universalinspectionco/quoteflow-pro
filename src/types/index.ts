@@ -19,6 +19,7 @@
   title: string
   attnTo: string
   ref: string
+  poNumber?: string
   location: string
   project: string
   introParagraph: string
@@ -28,6 +29,8 @@
   closingNote: string
   // Status tracking
   statusTracking: 'Draft' | 'Waiting For PO' | 'Job Received' | 'Under Process' | 'Completed' | 'Lost'
+  /** Optional follow-up date (ISO yyyy-mm-dd) used by the quotations dashboard. */
+  followUpDate?: string
   via: string
   clientCode: string
   svc: string
@@ -88,6 +91,8 @@ export interface AnnexurePage {
 
 export interface PriceBookItem {
   id: string
+  /** Company/branch that owns this rate. Rates are segregated per company. */
+  companyId: string
   category: string
   description: string
   unit: string
@@ -102,8 +107,23 @@ export interface PriceBookItem {
 export interface PriceHistoryEntry {
   date: string
   rate: number
+  /** Rate before this change, when known. */
+  previousRate?: number
   changedBy?: string
   reason?: string
+}
+
+/**
+ * A company (or branch/division) whose price book is kept separate from the
+ * others. `isDefault` marks the company seeded from Settings on first run.
+ */
+export interface Company {
+  id: string
+  name: string
+  vatNumber?: string
+  currency: string
+  taxRate: number
+  isDefault?: boolean
 }
 
 export interface Settings {
@@ -183,11 +203,15 @@ export interface UserPreferences {
   lastViewedQuoteId?: string
   recentClients: string[]
   favoriteItems: string[]
+  /** Local directory chosen in Settings → Local Storage for JSON backups. */
+  backupFolder?: string
 }
 
 export interface AppState {
   quotations: Quotation[]
   priceBook: PriceBookItem[]
+  companies: Company[]
+  activeCompanyId: string
   settings: Settings
   preferences: UserPreferences
   currentView: 'dashboard' | 'quotes' | 'editor' | 'pricebook' | 'reports' | 'settings' | 'ai-studio' | 'diagnostics'
@@ -197,6 +221,19 @@ export interface AppState {
 }
 
 export type ViewType = AppState['currentView']
+
+/** Portable JSON backup format written by Settings / Command Palette. */
+export interface BackupPayload {
+  app: string
+  version: number
+  exportedAt: string
+  settings: Settings
+  preferences: UserPreferences
+  quotations: Quotation[]
+  priceBook: PriceBookItem[]
+  companies: Company[]
+  activeCompanyId: string
+}
 
 export interface Toast {
   id: string

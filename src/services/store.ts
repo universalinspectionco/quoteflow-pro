@@ -1,6 +1,22 @@
 ﻿import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import type { AppState, Settings, UserPreferences, Quotation, PriceBookItem, Toast, DiagnosticResult, AIQuoteResponse } from '@/types'
+import type {
+  AppState,
+  Company,
+  Settings,
+  UserPreferences,
+  Quotation,
+  PriceBookItem,
+  Toast,
+  DiagnosticResult,
+  AIQuoteResponse,
+} from '@/types'
+import {
+  DEFAULT_COMPANY_ID,
+  DEFAULT_CURRENCY,
+  DEFAULT_TAX_RATE,
+} from '@/utils/pricebook'
+import { normalizeImportedQuotation } from '@/utils/quotationImport'
 
 const defaultSettings: Settings = {
   company: {
@@ -43,8 +59,8 @@ const defaultSettings: Settings = {
     format: '{PREFIX}-{NUMBER:0000}{SUFFIX}',
   },
   defaults: {
-    taxRate: 5,
-    currency: 'AED',
+    taxRate: 15,
+    currency: 'SAR',
     dateFormat: 'DD/MM/YYYY',
     language: 'en',
     rtlEnabled: false,
@@ -52,6 +68,17 @@ const defaultSettings: Settings = {
     validityDays: 30,
   },
 }
+
+const defaultCompanies: Company[] = [
+  {
+    id: DEFAULT_COMPANY_ID,
+    name: defaultSettings.company.name,
+    vatNumber: defaultSettings.company.vatNumber,
+    currency: defaultSettings.defaults.currency,
+    taxRate: defaultSettings.defaults.taxRate,
+    isDefault: true,
+  },
+]
 
 const defaultPreferences: UserPreferences = {
   theme: 'glass',
@@ -80,9 +107,12 @@ interface StoreState extends AppState {
   duplicateQuotation: (id: string) => void
   setQuotations: (quotes: Quotation[]) => void
   addPriceBookItem: (item: PriceBookItem) => void
-  updatePriceBookItem: (id: string, data: Partial<PriceBookItem>) => void
+  updatePriceBookItem: (id: string, data: Partial<PriceBookItem>, historyReason?: string) => void
   deletePriceBookItem: (id: string) => void
   setPriceBook: (items: PriceBookItem[]) => void
+  setActiveCompany: (id: string) => void
+  addCompany: (company: Company) => void
+  updateCompany: (id: string, data: Partial<Company>) => void
   updateSettings: (settings: Partial<Settings>) => void
   updatePreferences: (prefs: Partial<UserPreferences>) => void
   setLoading: (loading: boolean) => void
@@ -93,10 +123,19 @@ interface StoreState extends AppState {
   setAIQuoteResponse: (response: AIQuoteResponse | null) => void
   incrementQuoteNumber: () => void
   nextQuoteNumber: () => string
+  restoreBackup: (data: {
+    settings?: Partial<Settings>
+    preferences?: Partial<UserPreferences>
+    quotations?: unknown[]
+    priceBook?: unknown[]
+    companies?: unknown[]
+    activeCompanyId?: string
+  }) => boolean
+  resetSettings: () => void
 }
 
 function generateId() {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
 function generateQuoteNumber(settings: Settings): string {
@@ -107,11 +146,158 @@ function generateQuoteNumber(settings: Settings): string {
     .replace('{SUFFIX}', suffix)
 }
 
+function toFiniteNumber(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''))
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function normalizeHistory(value: unknown): PriceBookItem['history'] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+    .map((entry) => ({
+      date: typeof entry.date === 'string' ? entry.date : new Date().toISOString(),
+      rate: toFiniteNumber(entry.rate, 0),
+      previousRate: Number.isFinite(Number(entry.previousRate)) ? Number(entry.previousRate) : undefined,
+      changedBy: typeof entry.changedBy === 'string' ? entry.changedBy : undefined,
+      reason: typeof entry.reason === 'string' ? entry.reason : undefined,
+    }))
+    .slice(-200)
+}
+
+/** Normalizes persisted or imported price book data so old rows never crash the view. */
+function normalizePriceBookItem(item: Partial<PriceBookItem> | null | undefined, fallbackCompanyId: string): PriceBookItem {
+  const now = new Date().toISOString()
+  return {
+    id: typeof item?.id === 'string' && item.id ? item.id : generateId(),
+    companyId:
+      typeof item?.companyId === 'string' && item.companyId ? item.companyId : fallbackCompanyId,
+    description: typeof item?.description === 'string' ? item.description : 'Untitled item',
+    category: typeof item?.category === 'string' && item.category ? item.category : 'Other',
+    unit: typeof item?.unit === 'string' && item.unit ? item.unit : 'PCS',
+    rate: toFiniteNumber(item?.rate, 0),
+    taxRate: toFiniteNumber(item?.taxRate, DEFAULT_TAX_RATE),
+    serviceRef: typeof item?.serviceRef === 'string' && item.serviceRef ? item.serviceRef : undefined,
+    history: normalizeHistory(item?.history),
+    createdAt: typeof item?.createdAt === 'string' ? item.createdAt : now,
+    updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : now,
+  }
+}
+
+function mergeSettings(base: Settings, partial?: Partial<Settings>): Settings {
+  if (!partial || typeof partial !== 'object') return base
+  const section = <T>(value: unknown, fallback: T): T =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? ({ ...fallback, ...(value as Partial<T>) } as T)
+      : fallback
+  const defaults = section(partial.defaults, base.defaults)
+  return {
+    company: section(partial.company, base.company),
+    letterhead: section(partial.letterhead, base.letterhead),
+    signature: section(partial.signature, base.signature),
+    branding: section(partial.branding, base.branding),
+    numbering: section(partial.numbering, base.numbering),
+    defaults: {
+      ...defaults,
+      // Saudi Arabia: keep a valid 15% VAT and SAR currency on every restore.
+      taxRate: Number.isFinite(defaults.taxRate) && defaults.taxRate > 0 ? defaults.taxRate : DEFAULT_TAX_RATE,
+      currency: typeof defaults.currency === 'string' && defaults.currency ? defaults.currency : DEFAULT_CURRENCY,
+    },
+  }
+}
+
+function normalizePersistedState(persisted: unknown): Record<string, unknown> {
+  const source =
+    typeof persisted === 'object' && persisted !== null
+      ? ({ ...(persisted as Record<string, unknown>) } as Record<string, unknown>)
+      : {}
+
+  const rawSettings = source.settings
+  const persistedSettings =
+    typeof rawSettings === 'object' && rawSettings !== null
+      ? (rawSettings as Record<string, unknown>)
+      : {}
+  const persistedCompany =
+    typeof persistedSettings.company === 'object' && persistedSettings.company !== null
+      ? (persistedSettings.company as Record<string, unknown>)
+      : {}
+
+  const fallbackCompanyId =
+    typeof source.activeCompanyId === 'string' && source.activeCompanyId
+      ? source.activeCompanyId
+      : DEFAULT_COMPANY_ID
+
+  const rawPriceBook = source.priceBook
+  const priceBook = Array.isArray(rawPriceBook)
+    ? rawPriceBook.map((item) =>
+        normalizePriceBookItem(item as Partial<PriceBookItem>, fallbackCompanyId),
+      )
+    : []
+
+  const rawCompanies = source.companies
+  const companies: Company[] =
+    Array.isArray(rawCompanies) && rawCompanies.length > 0
+      ? rawCompanies
+          .filter((company): company is Record<string, unknown> => typeof company === 'object' && company !== null)
+          .map((company, index) => ({
+            id: typeof company.id === 'string' && company.id ? company.id : `company-${index + 1}`,
+            name:
+              typeof company.name === 'string' && company.name
+                ? company.name
+                : defaultCompanies[0].name,
+            vatNumber: typeof company.vatNumber === 'string' ? company.vatNumber : undefined,
+            currency:
+              typeof company.currency === 'string' && company.currency
+                ? company.currency
+                : DEFAULT_CURRENCY,
+            taxRate: toFiniteNumber(company.taxRate, DEFAULT_TAX_RATE),
+            isDefault: Boolean(company.isDefault),
+          }))
+      : [
+          {
+            id: DEFAULT_COMPANY_ID,
+            name:
+              typeof persistedCompany.name === 'string' && persistedCompany.name
+                ? persistedCompany.name
+                : defaultCompanies[0].name,
+            vatNumber:
+              typeof persistedCompany.vatNumber === 'string'
+                ? persistedCompany.vatNumber
+                : defaultCompanies[0].vatNumber,
+            currency:
+              typeof persistedSettings.defaults === 'object' &&
+              persistedSettings.defaults !== null &&
+              typeof (persistedSettings.defaults as Record<string, unknown>).currency === 'string'
+                ? String((persistedSettings.defaults as Record<string, unknown>).currency)
+                : DEFAULT_CURRENCY,
+            taxRate:
+              typeof persistedSettings.defaults === 'object' &&
+              persistedSettings.defaults !== null
+                ? toFiniteNumber(
+                    (persistedSettings.defaults as Record<string, unknown>).taxRate,
+                    DEFAULT_TAX_RATE,
+                  )
+                : DEFAULT_TAX_RATE,
+            isDefault: true,
+          },
+        ]
+
+  const activeCompanyId =
+    typeof source.activeCompanyId === 'string' &&
+    companies.some((company) => company.id === source.activeCompanyId)
+      ? source.activeCompanyId
+      : companies[0].id
+
+  return { ...source, priceBook, companies, activeCompanyId }
+}
+
 export const useStore = create<StoreState>()(
   persist(
     (set, get) => ({
       quotations: initialQuotations,
       priceBook: initialPriceBook,
+      companies: defaultCompanies,
+      activeCompanyId: DEFAULT_COMPANY_ID,
       settings: defaultSettings,
       preferences: defaultPreferences,
       currentView: 'dashboard',
@@ -165,11 +351,55 @@ export const useStore = create<StoreState>()(
       setQuotations: (quotes) => set({ quotations: quotes }),
 
       addPriceBookItem: (item) =>
-        set((state) => ({ priceBook: [{ ...item, id: generateId(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, ...state.priceBook] })),
+        set((state) => {
+          const now = new Date().toISOString()
+          const companyId =
+            typeof item.companyId === 'string' && item.companyId
+              ? item.companyId
+              : state.activeCompanyId
+          return {
+            priceBook: [
+              {
+                ...item,
+                id: item.id || generateId(),
+                companyId,
+                history: normalizeHistory(item.history),
+                createdAt: item.createdAt || now,
+                updatedAt: now,
+              },
+              ...state.priceBook,
+            ],
+          }
+        }),
 
-      updatePriceBookItem: (id, data) =>
+      updatePriceBookItem: (id, data, historyReason = 'Manual rate update') =>
         set((state) => ({
-          priceBook: state.priceBook.map((item) => (item.id === id ? { ...item, ...data, updatedAt: new Date().toISOString() } : item)),
+          priceBook: state.priceBook.map((item) => {
+            if (item.id !== id) return item
+            const now = new Date().toISOString()
+            const nextRate = typeof data.rate === 'number' ? data.rate : item.rate
+            const rateChanged = Number.isFinite(nextRate) && nextRate !== item.rate
+            const history = rateChanged
+              ? [
+                  ...normalizeHistory(item.history),
+                  {
+                    date: now,
+                    rate: nextRate,
+                    previousRate: item.rate,
+                    changedBy: 'Price Book',
+                    reason: historyReason,
+                  },
+                ].slice(-200)
+              : normalizeHistory(item.history)
+
+            return {
+              ...item,
+              ...data,
+              rate: nextRate,
+              history,
+              updatedAt: now,
+            }
+          }),
         })),
 
       deletePriceBookItem: (id) =>
@@ -177,8 +407,56 @@ export const useStore = create<StoreState>()(
 
       setPriceBook: (items) => set({ priceBook: items }),
 
+      setActiveCompany: (id) =>
+        set((state) =>
+          state.companies.some((company) => company.id === id) ? { activeCompanyId: id } : {},
+        ),
+
+      addCompany: (company) =>
+        set((state) => {
+          if (state.companies.some((existing) => existing.id === company.id)) {
+            return {
+              companies: state.companies.map((existing) =>
+                existing.id === company.id ? { ...existing, ...company } : existing,
+              ),
+            }
+          }
+          return {
+            companies: [...state.companies, company],
+            activeCompanyId: company.id,
+          }
+        }),
+
+      updateCompany: (id, data) =>
+        set((state) => ({
+          companies: state.companies.map((company) =>
+            company.id === id ? { ...company, ...data } : company,
+          ),
+        })),
+
       updateSettings: (settings) =>
-        set((state) => ({ settings: { ...state.settings, ...settings } })),
+        set((state) => {
+          const nextSettings = { ...state.settings, ...settings }
+          const shouldSyncDefaultCompany = Boolean(settings.company)
+          return {
+            settings: nextSettings,
+            companies: shouldSyncDefaultCompany
+              ? state.companies.map((company) =>
+                  company.isDefault || company.id === DEFAULT_COMPANY_ID
+                    ? {
+                        ...company,
+                        name: nextSettings.company.name || company.name,
+                        vatNumber: nextSettings.company.vatNumber || company.vatNumber,
+                        currency: nextSettings.defaults.currency || company.currency,
+                        taxRate: Number.isFinite(nextSettings.defaults.taxRate)
+                          ? nextSettings.defaults.taxRate
+                          : company.taxRate,
+                      }
+                    : company,
+                )
+              : state.companies,
+          }
+        }),
 
       updatePreferences: (prefs) =>
         set((state) => ({ preferences: { ...state.preferences, ...prefs } })),
@@ -207,37 +485,144 @@ export const useStore = create<StoreState>()(
         })),
 
       nextQuoteNumber: () => generateQuoteNumber(get().settings),
+
+      restoreBackup: (data) => {
+        const state = get()
+        const settings = mergeSettings(defaultSettings, data.settings)
+        const normalized = normalizePersistedState({
+          priceBook: data.priceBook ?? state.priceBook,
+          companies: data.companies ?? state.companies,
+          activeCompanyId: data.activeCompanyId ?? state.activeCompanyId,
+          settings,
+        })
+        const quotations = Array.isArray(data.quotations)
+          ? data.quotations
+              .map((quote, index) => normalizeImportedQuotation(quote, { settings, index }))
+              .filter((quote): quote is Quotation => quote !== null)
+          : state.quotations
+        const preferences = {
+          ...defaultPreferences,
+          ...state.preferences,
+          ...(data.preferences && typeof data.preferences === 'object' ? data.preferences : {}),
+        }
+        set({
+          settings,
+          preferences,
+          quotations,
+          priceBook: Array.isArray(normalized.priceBook)
+            ? (normalized.priceBook as PriceBookItem[])
+            : state.priceBook,
+          companies: Array.isArray(normalized.companies) && normalized.companies.length > 0
+            ? (normalized.companies as Company[])
+            : state.companies,
+          activeCompanyId:
+            typeof normalized.activeCompanyId === 'string'
+              ? normalized.activeCompanyId
+              : state.activeCompanyId,
+          error: undefined,
+        })
+        return true
+      },
+
+      resetSettings: () =>
+        set((state) => ({
+          settings: defaultSettings,
+          preferences: {
+            ...state.preferences,
+            theme: defaultSettings.branding.theme,
+            language: 'en',
+            rtlEnabled: false,
+          },
+          companies: state.companies.map((company) =>
+            company.isDefault || company.id === DEFAULT_COMPANY_ID
+              ? {
+                  ...company,
+                  name: defaultSettings.company.name,
+                  vatNumber: defaultSettings.company.vatNumber,
+                  currency: defaultSettings.defaults.currency,
+                  taxRate: defaultSettings.defaults.taxRate,
+                }
+              : company,
+          ),
+        })),
     }),
     {
       name: 'quoteflow-pro-remake',
       storage: createJSONStorage(() => localStorage),
-      version: 4,
+      version: 5,
       migrate: (persisted: unknown, version: number) => {
+        let next = normalizePersistedState(persisted)
+
         if (version < 3) {
-          const p = persisted as Record<string, unknown>
-          return {
-            ...p,
-            preferences: { ...defaultPreferences, ...(p.preferences as Record<string, unknown> || {}) },
-          }
+          const currentPrefs =
+            typeof next.preferences === 'object' && next.preferences !== null
+              ? (next.preferences as Record<string, unknown>)
+              : {}
+          next = { ...next, preferences: { ...defaultPreferences, ...currentPrefs } }
         }
         if (version < 4) {
-          const p = persisted as Record<string, unknown>
-          const priceBook = (p.priceBook as any[]) || []
-          return {
-            ...p,
-            priceBook: priceBook.map(item => {
+          const rows = Array.isArray(next.priceBook)
+            ? (next.priceBook as Array<Record<string, unknown>>)
+            : []
+          next = {
+            ...next,
+            priceBook: rows.map((item) => {
               const { hsnCode, ...rest } = item
               return {
                 ...rest,
-                serviceRef: hsnCode || '',
+                serviceRef: item.serviceRef || (typeof hsnCode === 'string' ? hsnCode : ''),
               }
             }),
           }
         }
-        return persisted
+        if (version < 5) {
+          next = normalizePersistedState(next)
+        }
+        return next
       },
-    }
-  )
+      merge: (persisted, current) => {
+        const normalized = normalizePersistedState(persisted)
+        return {
+          ...current,
+          ...(normalized as Partial<StoreState>),
+          settings: {
+            ...current.settings,
+            ...((normalized.settings as Partial<Settings> | undefined) || {}),
+            company: {
+              ...current.settings.company,
+              ...((normalized.settings as Settings | undefined)?.company || {}),
+            },
+            defaults: {
+              ...current.settings.defaults,
+              ...((normalized.settings as Settings | undefined)?.defaults || {}),
+            },
+          },
+          preferences: {
+            ...current.preferences,
+            ...((normalized.preferences as Partial<UserPreferences> | undefined) || {}),
+          },
+          priceBook: Array.isArray(normalized.priceBook)
+            ? (normalized.priceBook as PriceBookItem[])
+            : current.priceBook,
+          companies:
+            Array.isArray(normalized.companies) && normalized.companies.length > 0
+              ? (normalized.companies as Company[])
+              : current.companies,
+          activeCompanyId:
+            typeof normalized.activeCompanyId === 'string'
+              ? normalized.activeCompanyId
+              : current.activeCompanyId,
+        }
+      },
+    },
+  ),
 )
 
-export { generateId, generateQuoteNumber }
+export {
+  generateId,
+  generateQuoteNumber,
+  defaultSettings,
+  defaultCompanies,
+  defaultPreferences,
+  normalizePriceBookItem,
+}

@@ -36,7 +36,7 @@ const navigation = [
 ] as const
 
 export function Sidebar() {
-  const { currentView, setView, preferences, updatePreferences } = useStore()
+  const { currentView, setView, preferences, updatePreferences, setSelectedQuote } = useStore()
   const { theme, setTheme, themes } = useTheme()
   const [collapsed, setCollapsed] = useState(preferences.sidebarCollapsed)
   const [hoveredItem, setHoveredItem] = useState<string | null>(null)
@@ -197,6 +197,7 @@ export function Sidebar() {
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
+                  onClick={() => { setSelectedQuote(undefined); setView('editor') }}
                   className="flex-1 glass-hover py-2 px-3 rounded-xl text-sm font-medium flex items-center justify-center gap-2"
                 >
                   <Plus className="w-4 h-4" />
@@ -221,7 +222,7 @@ export function Sidebar() {
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.95 }}
               className="glass-hover p-2 rounded-xl"
-              onClick={() => setView('editor')}
+              onClick={() => { setSelectedQuote(undefined); setView('editor') }}
               aria-label="New Quote"
             >
               <Plus className="w-5 h-5" />
