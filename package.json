@@ -1,0 +1,76 @@
+{
+  "name": "quoteflow-pro-remake",
+  "private": true,
+  "version": "3.0.0",
+  "description": "QuoteFlow Pro Remake — Premium Quotation & Price Book Management System by Universal Inspection Co. Ltd.",
+  "author": "Universal Inspection Co. Ltd. (UIC)",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "package:windows": "npm run build && node scripts/package-windows.mjs",
+    "test:e2e": "npx playwright test",
+    "test:e2e:ui": "npx playwright test --ui"
+  },
+  "dependencies": {
+    "@google/genai": "^3.6.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-react": "^6.3.0",
+    "canvas-confetti": "^1.9.4",
+    "dotenv": "^17.2.3",
+    "electron-updater": "^6.8.11",
+    "express": "^4.21.2",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.546.0",
+    "mammoth": "^1.7.0",
+    "motion": "^12.43.0",
+    "pdfjs-dist": "^4.0.379",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/canvas-confetti": "^1.9.0",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/xlsx": "^0.0.36",
+    "autoprefixer": "^10.4.21",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.8.2",
+    "vite": "^8.3.0",
+    "vite-plugin-pwa": "^2.0.0"
+  },
+  "homepage": "./",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/universalinspectionco/Quotation-Manager-V2.git"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  },
+  "build": {
+    "productName": "QuoteFlow Pro",
+    "appId": "com.universalinspection.quoteflowpro",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ]
+  }
+}

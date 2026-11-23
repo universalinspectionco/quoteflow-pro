@@ -1,0 +1,43 @@
+{
+  "name": "QuoteFlow Pro",
+  "short_name": "QuoteFlow",
+  "description": "Professional Quotation & Price Book Management System by Universal Inspection Co. Ltd.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["business", "productivity", "finance"],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "New Quotation",
+      "short_name": "New Quote",
+      "description": "Create a new quotation",
+      "url": "/#/editor",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "View Quotations",
+      "short_name": "Quotes",
+      "description": "Browse all quotations",
+      "url": "/#/quotes",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    }
+  ]
+}
