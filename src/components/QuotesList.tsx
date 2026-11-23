@@ -96,7 +96,7 @@ export function QuotesList() {
       setImportRows(rows)
       setImportStatus('idle')
     } catch (err) {
-      console.error('Quotation import preview failed:', err)
+      console.warn('Quotation import preview failed:', err)
       setImportError(err instanceof Error ? err.message : 'Could not read the selected file')
       setImportStatus('error')
     }

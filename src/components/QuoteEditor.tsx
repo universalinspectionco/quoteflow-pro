@@ -401,7 +401,13 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
 
     try {
       const { jsPDF } = await import("jspdf")
-      const { default: autoTable } = await import("jspdf-autotable")
+      const autoTableModule = await import("jspdf-autotable")
+      // Vite's CJS interop can expose the function at `.default.default`.
+      const autoTable = (
+        (autoTableModule.default as unknown as { default?: typeof autoTableModule.default })?.default ||
+        autoTableModule.default ||
+        (autoTableModule as unknown as { applyPlugin: typeof autoTableModule.default }).applyPlugin
+      )
       const doc = new jsPDF()
 
       doc.setFontSize(18)

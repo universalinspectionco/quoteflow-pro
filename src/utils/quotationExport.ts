@@ -66,10 +66,17 @@ export async function exportQuotationsToPdf(
   companyName = 'Universal Inspection Co. Ltd.',
 ): Promise<void> {
   if (quotes.length === 0) return
-  const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+  const [{ jsPDF }, autoTableModule] = await Promise.all([
     import('jspdf'),
     import('jspdf-autotable'),
   ])
+  // Vite's CJS interop can expose the function at `.default.default`, so
+  // resolve both shapes before calling it.
+  const autoTable = (
+    (autoTableModule.default as unknown as { default?: typeof autoTableModule.default })?.default ||
+    autoTableModule.default ||
+    (autoTableModule as unknown as { applyPlugin: typeof autoTableModule.default }).applyPlugin
+  )
 
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
   const rows = exportRows(quotes)
