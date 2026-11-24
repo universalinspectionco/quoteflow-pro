@@ -7,6 +7,7 @@ import {
   BarChart3, TrendingUp, DollarSign, Users, FileText, Download, Filter, Calendar, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { useStore } from '@/services/store'
+import { exportAllTimeReport } from '@/utils/quotationExport'
 import { formatCurrency, formatDate, formatNumber } from '@/utils/formatters'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -97,8 +98,15 @@ export function ReportsView() {
     return breakdown
   }, [filteredQuotes])
 
-  const handleExport = () => {
-    addToast({ type: 'info', title: 'Export Started', message: 'Generating report export...' })
+  const handleExport = async () => {
+    addToast({ type: 'info', title: 'Export Started', message: 'Generating UIC all-time report...' })
+    try {
+      await exportAllTimeReport(quotations, settings)
+      addToast({ type: 'success', title: 'Exported', message: 'All-Time Quotation Report downloaded' })
+    } catch (err) {
+      console.error('Report export failed:', err)
+      addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the report.' })
+    }
   }
 
   return (

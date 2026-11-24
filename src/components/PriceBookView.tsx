@@ -28,7 +28,7 @@ import type {
   PriceBookImportDraft,
   PriceBookMergeStrategy,
 } from '@/utils/pricebook'
-import { extractPdfRows } from '@/utils/quotationImport'
+import { mapFlexiblePriceBookRow, readQuotationImportRows } from '@/utils/quotationImport'
 
 type ElectronApiWithBase64 = NonNullable<Window['electronAPI']> & {
   readFileBase64?: (path: string) => Promise<string | null>
@@ -72,19 +72,6 @@ const getVisiblePages = (current: number, total: number): number[] => {
   return Array.from({ length: 7 }, (_, index) => start + index)
 }
 
-async function rowsFromWorkbook(
-  data: string | ArrayBuffer | Uint8Array,
-  type: 'string' | 'array' | 'base64',
-): Promise<Record<string, unknown>[]> {
-  const XLSX = await import('xlsx')
-  const workbook = XLSX.read(data, { type })
-  const sheetName = workbook.SheetNames[0]
-  if (!sheetName) return []
-  const sheet = workbook.Sheets[sheetName]
-  if (!sheet) return []
-  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false })
-}
-
 function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64)
   const bytes = new Uint8Array(binary.length)
@@ -92,50 +79,26 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes
 }
 
-async function readImportRows(source: ImportSource): Promise<Record<string, unknown>[]> {
-  const extension = source.name.split('.').pop()?.toLowerCase() || ''
-
+async function readJsonImportRows(source: ImportSource): Promise<Record<string, unknown>[] | null> {
+  if (!source.name.toLowerCase().endsWith('.json')) return null
+  let content: string
   if (source.kind === 'file') {
-    if (extension === 'pdf') {
-      return extractPdfRows(new Uint8Array(await source.file.arrayBuffer()))
-    }
-    if (extension === 'json') {
-      const text = await source.file.text()
-      return extractRowsFromParsedJson(JSON.parse(text.replace(/^\uFEFF/, '')))
-    }
-    if (extension === 'csv' || extension === 'txt') {
-      const text = await source.file.text()
-      return rowsFromWorkbook(text, 'string')
-    }
-    const buffer = await source.file.arrayBuffer()
-    return rowsFromWorkbook(new Uint8Array(buffer), 'array')
+    content = await source.file.text()
+  } else {
+    const api = window.electronAPI
+    if (!api?.readFile) throw new Error('File reading is not available in this environment')
+    const result = await api.readFile(source.path)
+    if (result === null) throw new Error('Could not read the selected file')
+    content = result
   }
+  return extractRowsFromParsedJson(JSON.parse(content.replace(/^\uFEFF/, '')))
+}
 
-  const api = window.electronAPI as ElectronApiWithBase64 | undefined
-  if (!api?.readFile) throw new Error('File reading is not available in this environment')
-
-  if (extension === 'pdf') {
-    if (!api.readFileBase64) throw new Error('PDF reading is not available in this runtime')
-    const base64 = await api.readFileBase64(source.path)
-    if (!base64) throw new Error('Could not read the selected file')
-    return extractPdfRows(base64ToBytes(base64))
-  }
-
-  if (extension === 'json') {
-    const text = await api.readFile(source.path)
-    if (text === null) throw new Error('Could not read the selected file')
-    return extractRowsFromParsedJson(JSON.parse(text.replace(/^\uFEFF/, '')))
-  }
-  if (extension === 'csv' || extension === 'txt') {
-    const text = await api.readFile(source.path)
-    if (text === null) throw new Error('Could not read the selected file')
-    return rowsFromWorkbook(text.replace(/^\uFEFF/, ''), 'string')
-  }
-  if (api.readFileBase64) {
-    const base64 = await api.readFileBase64(source.path)
-    if (base64) return rowsFromWorkbook(base64, 'base64')
-  }
-  throw new Error('This version of the desktop runtime cannot read binary Excel files')
+async function readImportRows(source: ImportSource): Promise<Record<string, unknown>[]> {
+  const jsonRows = await readJsonImportRows(source)
+  if (jsonRows) return jsonRows
+  // CSV/Excel/PDF share the flexible, header-detecting parser used by quotations.
+  return readQuotationImportRows(source)
 }
 
 export function PriceBookView() {
@@ -411,21 +374,21 @@ export function PriceBookView() {
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => setShowCompanies(true)}
-            className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2"
+            className="glass-hover p-2 rounded-xl text-text-secondary hover:text-text-primary"
             title="Manage companies"
+            aria-label="Manage companies"
           >
             <Building2 className="w-4 h-4" />
-            Companies
           </motion.button>
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => setShowLookup(true)}
-            className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2"
+            className="glass-hover p-2 rounded-xl text-text-secondary hover:text-text-primary"
             title="Look up a rate"
+            aria-label="Look up a rate"
           >
             <Calculator className="w-4 h-4" />
-            Rate Lookup
           </motion.button>
           <motion.button
             whileHover={{ scale: 1.02 }}
@@ -1267,7 +1230,8 @@ function ImportDialog({
   onApply: (items: PriceBookItem[]) => void
   onImported: (companyId: string, result: ImportResult) => void
 }) {
-  const [source, setSource] = useState<ImportSource | null>(null)
+  const [sources, setSources] = useState<ImportSource[]>([])
+  const [warnings, setWarnings] = useState<string[]>([])
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
   const [status, setStatus] = useState<ImportStatus>('idle')
   const [error, setError] = useState('')
@@ -1278,7 +1242,7 @@ function ImportDialog({
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const normalized = useMemo(
-    () => normalizeImportedRows(rows, { companyId: targetCompanyId, defaultTaxRate }),
+    () => normalizeImportedRows(rows.map(mapFlexiblePriceBookRow), { companyId: targetCompanyId, defaultTaxRate }),
     [rows, targetCompanyId, defaultTaxRate],
   )
   const drafts = normalized.drafts
@@ -1288,26 +1252,39 @@ function ImportDialog({
     return drafts.filter((draft) => keys.has(priceBookMatchKey(draft))).length
   }, [priceBook, drafts])
 
-  const loadSource = async (nextSource: ImportSource) => {
-    setSource(nextSource)
+  const loadSources = async (nextSources: ImportSource[]) => {
+    if (nextSources.length === 0) return
+    setSources(nextSources)
     setRows([])
+    setWarnings([])
     setError('')
     setResult(null)
     setProgress(0)
     setStatus('reading')
     try {
-      const parsed = await readImportRows(nextSource)
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        throw new Error('No data rows were found in the selected file')
+      const collected: Record<string, unknown>[] = []
+      const problems: string[] = []
+      for (const file of nextSources) {
+        try {
+          const parsed = await readImportRows(file)
+          if (Array.isArray(parsed)) collected.push(...parsed)
+          else problems.push(`${file.name}: no rows found`)
+        } catch (caught) {
+          problems.push(`${file.name}: ${caught instanceof Error ? caught.message : 'Could not read file'}`)
+        }
       }
-      setRows(parsed)
+      if (collected.length === 0) {
+        throw new Error(problems.join(' · ') || 'No data rows were found in the selected files')
+      }
+      setRows(collected)
+      setWarnings(problems)
       setTargetCompanyId((current) =>
         companies.some((company) => company.id === current) ? current : defaultCompanyId,
       )
       setStatus('ready')
     } catch (caught) {
-      console.error('Price book import preview failed:', caught)
-      setError(caught instanceof Error ? caught.message : 'Could not read the selected file')
+      console.warn('Price book import preview failed:', caught)
+      setError(caught instanceof Error ? caught.message : 'Could not read the selected files')
       setStatus('error')
     }
   }
@@ -1323,24 +1300,33 @@ function ImportDialog({
         { name: 'CSV', extensions: ['csv'] },
         { name: 'PDF', extensions: ['pdf'] },
       ],
-      properties: ['openFile'],
+      properties: ['openFile', 'multiSelections'],
     })
     if (!selected?.canceled && selected?.filePaths?.length > 0) {
-      const path = String(selected.filePaths[0])
-      await loadSource({ kind: 'path', path, name: fileNameFromPath(path) })
+      await loadSources(
+        selected.filePaths.map((path) => ({
+          kind: 'path' as const,
+          path: String(path),
+          name: fileNameFromPath(String(path)),
+        })),
+      )
     }
   }
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (file) void loadSource({ kind: 'file', file, name: file.name })
+    const files = Array.from(event.target.files || [])
+    if (files.length > 0) {
+      void loadSources(files.map((file) => ({ kind: 'file' as const, file, name: file.name })))
+    }
     event.target.value = ''
   }
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    const file = event.dataTransfer.files?.[0]
-    if (file) void loadSource({ kind: 'file', file, name: file.name })
+    const files = Array.from(event.dataTransfer.files || [])
+    if (files.length > 0) {
+      void loadSources(files.map((file) => ({ kind: 'file' as const, file, name: file.name })))
+    }
   }
 
   const handleImport = async () => {
@@ -1356,7 +1342,7 @@ function ImportDialog({
         priceBook,
         drafts,
         strategy,
-        `Import: ${source?.name || 'price book'}`,
+        `Import: ${sources.map((item) => item.name).join(', ') || 'price book'}`,
       )
       onApply(merged.priceBook)
       setProgress(100)
@@ -1381,7 +1367,8 @@ function ImportDialog({
   }
 
   const reset = () => {
-    setSource(null)
+    setSources([])
+    setWarnings([])
     setRows([])
     setStatus('idle')
     setError('')
@@ -1398,7 +1385,7 @@ function ImportDialog({
   return (
     <ModalShell
       title="Import Price Book"
-      subtitle="JSON, CSV, Excel or PDF · rows are merged into one company"
+      subtitle="Multiple JSON, CSV, Excel or PDF files · rows are merged into one company"
       onClose={onClose}
       width="max-w-2xl"
     >
@@ -1406,6 +1393,7 @@ function ImportDialog({
         ref={fileInputRef}
         type="file"
         accept=".json,.csv,.txt,.xlsx,.xls,.pdf"
+        multiple
         onChange={handleFileInput}
         className="hidden"
       />
@@ -1422,12 +1410,12 @@ function ImportDialog({
             onDrop={handleDrop}
           >
             <FileInput className="w-12 h-12 mx-auto text-text-muted mb-4" />
-            <p className="text-text-secondary mb-2">Click to select a file or drop it here</p>
+            <p className="text-text-secondary mb-2">Select multiple files or drop them here</p>
             <p className="text-xs text-text-muted">
-              Supports JSON (array or {'{ items: [...] }'}), CSV, Excel (.xlsx, .xls) and PDF
+              Supports JSON, CSV, Excel (.xlsx, .xls) and PDF · headers auto-detected on any row
             </p>
             <p className="text-xs text-text-muted mt-2">
-              Expected columns: description, category, unit, rate, taxRate, serviceRef
+              Recognized columns: Description/Equipment/Service, Qty, Rate, Size, Class, Unit, Remarks, Serial No
             </p>
           </div>
         )}
@@ -1436,18 +1424,25 @@ function ImportDialog({
           <div className="text-center py-12">
             <Loader2 className="w-10 h-10 mx-auto text-primary animate-spin mb-4" />
             <p className="font-medium text-text-primary">Reading file...</p>
-            <p className="text-sm text-text-muted mt-1">{source?.name || ''}</p>
+            <p className="text-sm text-text-muted mt-1">
+              {sources.map((item) => item.name).join(', ')}
+            </p>
           </div>
         )}
 
-        {status === 'ready' && source && (
+        {status === 'ready' && sources.length > 0 && (
           <div className="space-y-5">
             <div className="flex items-center justify-between p-4 glass-hover rounded-xl gap-3">
               <div className="min-w-0">
-                <p className="font-medium text-text-primary truncate">{source.name}</p>
+                <p className="font-medium text-text-primary truncate">
+                  {sources.map((item) => item.name).join(', ')}
+                </p>
                 <p className="text-xs text-text-muted mt-0.5">
                   {rows.length} rows · {drafts.length} valid · {normalized.invalid} invalid · {duplicateCount} duplicated in file
                 </p>
+                {warnings.length > 0 && (
+                  <p className="text-xs text-warning mt-1">{warnings.join(' · ')}</p>
+                )}
               </div>
               <button
                 type="button"

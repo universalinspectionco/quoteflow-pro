@@ -1,6 +1,6 @@
 ﻿"use client"
 
-import React from 'react'
+import { useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react'
 
@@ -18,53 +18,79 @@ const colors = {
   info: 'text-primary border-primary/30 bg-primary/10',
 }
 
+type ToastType = 'success' | 'error' | 'warning' | 'info'
+
+interface ToastData {
+  id: string
+  type: ToastType
+  title: string
+  message?: string
+  duration?: number
+}
+
 interface ToastContainerProps {
-  toasts: Array<{ id: string; type: 'success' | 'error' | 'warning' | 'info'; title: string; message?: string; duration?: number }>
+  toasts: ToastData[]
   onRemove: (id: string) => void
 }
 
-export function ToastContainer({ toasts, onRemove }: ToastContainerProps) {
-  // Show max 3 toasts at a time, newest first
-  const visibleToasts = toasts.slice(0, 3)
+function ToastItem({ toast, onRemove }: { toast: ToastData; onRemove: (id: string) => void }) {
+  const Icon = icons[toast.type]
+  const duration = toast.duration && toast.duration > 0 ? toast.duration : 3500
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => onRemove(toast.id), duration)
+    return () => window.clearTimeout(timer)
+  }, [toast.id, duration, onRemove])
 
   return (
-    <AnimatePresence>
-      {visibleToasts.map((toast, index) => (
-        <motion.div
-          key={toast.id}
-          initial={{ opacity: 0, y: 20, x: 0 }}
-          animate={{ opacity: 1, y: 0, x: 0 }}
-          exit={{ opacity: 0, y: 20, x: 0 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 30, delay: index * 0.1 }}
-          className={`min-w-[300px] max-w-md glass-elevated rounded-xl p-4 border shadow-elevated flex items-start gap-3 ${colors[toast.type]} relative`}
-          role="alert"
-          aria-live="polite"
-        >
-          <div className="flex-shrink-0 mt-0.5">
-            {React.createElement(icons[toast.type], { className: "w-5 h-5" })}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="font-semibold text-sm">{toast.title}</p>
-            {toast.message && <p className="text-sm text-text-secondary mt-0.5">{toast.message}</p>}
-          </div>
-          <motion.button
-            onClick={() => onRemove(toast.id)}
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            className="flex-shrink-0 p-1 rounded-lg hover:bg-white/10 transition-colors absolute right-2 top-2"
-            aria-label="Dismiss"
-          >
-            <X className="w-4 h-4" />
-          </motion.button>
-          {/* Auto-dismiss progress bar */}
-          <motion.div
-            initial={{ width: '100%' }}
-            animate={{ width: 0 }}
-            transition={{ duration: (toast.duration || 4000), ease: 'linear' }}
-            className="absolute bottom-0 left-0 h-0.5 bg-white/30 rounded-bl-xl rounded-br-xl"
-          />
-        </motion.div>
-      ))}
-    </AnimatePresence>
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: -14, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 28, scale: 0.96 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+      className={`pointer-events-auto w-full glass-elevated rounded-xl p-3.5 border shadow-elevated flex items-start gap-3 overflow-hidden ${colors[toast.type]}`}
+      role="alert"
+      aria-live="polite"
+    >
+      <div className="flex-shrink-0 mt-0.5">
+        <Icon className="w-5 h-5" />
+      </div>
+      <div className="flex-1 min-w-0 pr-5">
+        <p className="font-semibold text-sm leading-tight">{toast.title}</p>
+        {toast.message && (
+          <p className="text-xs text-text-secondary mt-1 break-words leading-snug">{toast.message}</p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => onRemove(toast.id)}
+        className="flex-shrink-0 p-1 rounded-lg hover:bg-white/10 transition-colors absolute right-2 top-2"
+        aria-label="Dismiss notification"
+      >
+        <X className="w-4 h-4" />
+      </button>
+      <motion.div
+        initial={{ width: '100%' }}
+        animate={{ width: 0 }}
+        transition={{ duration: duration / 1000, ease: 'linear' }}
+        className="absolute bottom-0 left-0 h-0.5 bg-white/30"
+      />
+    </motion.div>
+  )
+}
+
+export function ToastContainer({ toasts, onRemove }: ToastContainerProps) {
+  return (
+    <div
+      className="fixed top-4 right-4 z-50 flex w-[min(92vw,360px)] max-w-[360px] flex-col gap-2 pointer-events-none"
+      aria-label="Notifications"
+    >
+      <AnimatePresence initial={false} mode="popLayout">
+        {toasts.slice(0, 3).map((toast) => (
+          <ToastItem key={toast.id} toast={toast} onRemove={onRemove} />
+        ))}
+      </AnimatePresence>
+    </div>
   )
 }

@@ -29,14 +29,15 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { useStore } from '@/services/store'
+import { normalizePriceBookItem, useStore } from '@/services/store'
 import { formatCurrency, formatDate } from '@/utils/formatters'
 import {
   importedHeaderPreview,
+  mapFlexiblePriceBookRow,
   normalizeImportedQuotation,
-  readQuotationImportRows,
+  readImportSources,
 } from '@/utils/quotationImport'
-import type { ImportSource } from '@/utils/quotationImport'
+import type { ImportGroup, ImportSource } from '@/utils/quotationImport'
 import { exportQuotationsToExcel, exportQuotationsToPdf } from '@/utils/quotationExport'
 import type { Quotation } from '@/types'
 
@@ -55,6 +56,9 @@ export function QuotesList() {
     addToast,
     settings,
     companies,
+    activeCompanyId,
+    addPriceBookItem,
+    addCompany,
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'sent' | 'approved' | 'rejected' | 'expired'>('all')
@@ -65,11 +69,15 @@ export function QuotesList() {
   const [selectedQuotes, setSelectedQuotes] = useState<string[]>([])
   const itemsPerPage = 10
 
-  // Quotation import state — supports JSON, CSV, Excel and PDF.
+  // Multi-file import state — supports JSON, CSV, Excel and PDF.
   type ImportStatus = 'idle' | 'reading' | 'importing' | 'complete' | 'error'
+  type ImportTarget = 'quotations' | 'priceBook'
   const [showImportDialog, setShowImportDialog] = useState(false)
-  const [importSource, setImportSource] = useState<ImportSource | null>(null)
+  const [importSources, setImportSources] = useState<ImportSource[]>([])
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
+  const [importGroups, setImportGroups] = useState<ImportGroup[]>([])
+  const [importWarnings, setImportWarnings] = useState<string[]>([])
+  const [importTarget, setImportTarget] = useState<ImportTarget>('quotations')
   const [importProgress, setImportProgress] = useState(0)
   const [importStatus, setImportStatus] = useState<ImportStatus>('idle')
   const [importError, setImportError] = useState('')
@@ -84,27 +92,30 @@ export function QuotesList() {
     settings.company.name ||
     'Universal Inspection Co. Ltd.'
 
-  const loadImportSource = async (source: ImportSource) => {
-    setImportSource(source)
+  const loadImportSources = async (sources: ImportSource[]) => {
+    if (sources.length === 0) return
+    setImportSources(sources)
     setImportRows([])
+    setImportGroups([])
+    setImportWarnings([])
     setImportProgress(0)
     setImportError('')
     setImportStatus('reading')
-    try {
-      const rows = await readQuotationImportRows(source)
-      if (rows.length === 0) throw new Error('No data rows were found in the selected file')
-      setImportRows(rows)
-      setImportStatus('idle')
-    } catch (err) {
-      console.warn('Quotation import preview failed:', err)
-      setImportError(err instanceof Error ? err.message : 'Could not read the selected file')
+    const result = await readImportSources(sources)
+    if (result.rows.length === 0) {
+      setImportError(result.errors.join(' · ') || 'No data rows were found in the selected files')
       setImportStatus('error')
+      return
     }
+    setImportRows(result.rows)
+    setImportGroups(result.groups)
+    setImportWarnings(result.errors)
+    setImportStatus('idle')
   }
 
   const handleElectronImportFile = async () => {
     const result = await window.electronAPI?.showOpenDialog({
-      title: 'Import Quotations',
+      title: 'Import Quotations / Items',
       filters: [
         { name: 'All Supported', extensions: ['json', 'xlsx', 'xls', 'csv', 'pdf'] },
         { name: 'JSON', extensions: ['json'] },
@@ -112,16 +123,23 @@ export function QuotesList() {
         { name: 'CSV', extensions: ['csv'] },
         { name: 'PDF', extensions: ['pdf'] },
       ],
-      properties: ['openFile'],
+      properties: ['openFile', 'multiSelections'],
     })
     if (result?.canceled || !result?.filePaths?.length) return
-    const path = result.filePaths[0]
-    await loadImportSource({ kind: 'path', path, name: path.split(/[\\/]/).pop() || path })
+    await loadImportSources(
+      result.filePaths.map((filePath) => ({
+        kind: 'path' as const,
+        path: String(filePath),
+        name: String(filePath).split(/[\\/]/).pop() || String(filePath),
+      })),
+    )
   }
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (file) void loadImportSource({ kind: 'file', file, name: file.name })
+    const files = Array.from(event.target.files || [])
+    if (files.length > 0) {
+      void loadImportSources(files.map((file) => ({ kind: 'file' as const, file, name: file.name })))
+    }
     event.target.value = ''
   }
 
@@ -130,23 +148,56 @@ export function QuotesList() {
     try {
       setImportStatus('importing')
       setImportProgress(20)
-      const imported = importRows
-        .map((row, index) => normalizeImportedQuotation(row, { settings, index }))
-        .filter((quote): quote is Quotation => quote !== null)
-      if (imported.length === 0) throw new Error('No valid quotations were found in the selected file')
-      setImportProgress(70)
-      // One store write keeps bulk imports fast and avoids renumbering every row.
-      setQuotations([...imported, ...quotations])
+      const groups: ImportGroup[] = importGroups.length > 0
+        ? importGroups
+        : [{ source: importSources[0] || { kind: 'path', path: '', name: 'import' }, rows: importRows, clientName: 'Imported Client' }]
+
+      if (importTarget === 'priceBook') {
+        let count = 0
+        groups.forEach((group) => {
+          const slug = group.clientName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+          const companyId = `company-${slug || 'imported'}`
+          if (!companies.some((company) => company.name.toLowerCase() === group.clientName.toLowerCase())) {
+            addCompany({ id: companyId, name: group.clientName, currency: 'SAR', taxRate: 15 })
+          }
+          group.rows
+            .map(mapFlexiblePriceBookRow)
+            .filter((row) => Object.keys(row).length > 0)
+            .forEach((draft) => {
+              addPriceBookItem(normalizePriceBookItem(draft, companyId))
+              count += 1
+            })
+        })
+        if (count === 0) throw new Error('No price book items were found in the selected files')
+        setImportProgress(70)
+        addToast({ type: 'success', title: 'Imported', message: `${count} price book item(s) added` })
+      } else {
+        const imported = groups
+          .map((group, index) => {
+            const head = group.rows[0] || {}
+            const merged = {
+              ...head,
+              client: group.clientName,
+              items: group.rows,
+            }
+            return normalizeImportedQuotation(merged, { settings, index, clientName: group.clientName })
+          })
+          .filter((quote): quote is Quotation => quote !== null)
+        if (imported.length === 0) throw new Error('No valid quotations were found in the selected files')
+        setImportProgress(70)
+        // One store write keeps bulk imports fast and avoids renumbering every row.
+        setQuotations([...imported, ...quotations])
+        addToast({
+          type: 'success',
+          title: 'Imported',
+          message: `${imported.length} quotation${imported.length === 1 ? '' : 's'} imported (one per file)`,
+        })
+      }
       setImportProgress(100)
       setImportStatus('complete')
-      addToast({
-        type: 'success',
-        title: 'Imported',
-        message: `${imported.length} quotation${imported.length === 1 ? '' : 's'} imported`,
-      })
     } catch (err) {
       console.error('Quotation import failed:', err)
-      setImportError(err instanceof Error ? err.message : 'Could not import the selected file')
+      setImportError(err instanceof Error ? err.message : 'Could not import the selected files')
       setImportStatus('error')
       addToast({ type: 'error', title: 'Import Failed', message: 'Please check the file format and try again.' })
     }
@@ -154,8 +205,10 @@ export function QuotesList() {
 
   const resetImport = () => {
     setShowImportDialog(false)
-    setImportSource(null)
+    setImportSources([])
     setImportRows([])
+    setImportGroups([])
+    setImportWarnings([])
     setImportProgress(0)
     setImportStatus('idle')
     setImportError('')
@@ -163,8 +216,10 @@ export function QuotesList() {
 
   const handleImportQuotations = () => {
     setShowImportDialog(true)
-    setImportSource(null)
+    setImportSources([])
     setImportRows([])
+    setImportGroups([])
+    setImportWarnings([])
     setImportProgress(0)
     setImportStatus('idle')
     setImportError('')
@@ -322,26 +377,6 @@ export function QuotesList() {
           {selectedQuotes.length > 0 && (
             <div className="glass-hover px-4 py-2 rounded-xl flex items-center gap-3 border border-primary/30 bg-primary/10">
               <span className="text-sm font-medium text-primary">{selectedQuotes.length} selected</span>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={handleExportExcel}
-                className="text-sm text-primary hover:text-primary-hover font-medium flex items-center gap-1"
-                title="Export selected quotations to Excel"
-              >
-                <Download className="w-3 h-3" />
-                Excel
-              </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={handleExportPdf}
-                className="text-sm text-primary hover:text-primary-hover font-medium flex items-center gap-1"
-                title="Export selected quotations to PDF"
-              >
-                <Download className="w-3 h-3" />
-                PDF
-              </motion.button>
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
@@ -667,6 +702,7 @@ export function QuotesList() {
         ref={fileInputRef}
         type="file"
         accept=".json,.csv,.txt,.xlsx,.xls,.pdf"
+        multiple
         onChange={handleFileInput}
         className="hidden"
         aria-label="Choose quotation import file"
@@ -708,13 +744,15 @@ export function QuotesList() {
                 {importStatus === 'reading' ? (
                   <div className="text-center py-12">
                     <Loader2 className="w-10 h-10 mx-auto text-primary animate-spin mb-4" />
-                    <p className="font-medium text-text-primary">Reading file...</p>
-                    <p className="text-sm text-text-muted mt-1">{importSource?.name}</p>
+                    <p className="font-medium text-text-primary">Reading files...</p>
+                    <p className="text-sm text-text-muted mt-1">
+                      {importSources.map((source) => source.name).join(', ')}
+                    </p>
                   </div>
-                ) : !importSource || importRows.length === 0 ? (
+                ) : importSources.length === 0 || importRows.length === 0 ? (
                   <div className="space-y-6">
                     <div>
-                      <h4 className="font-medium text-text-primary mb-3">Select Import File</h4>
+                      <h4 className="font-medium text-text-primary mb-3">Select Import Files</h4>
                       <div
                         className="glass-hover border-2 border-dashed border-border-subtle rounded-xl p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
                         onClick={() => {
@@ -724,14 +762,18 @@ export function QuotesList() {
                         onDragOver={(e) => e.preventDefault()}
                         onDrop={(e) => {
                           e.preventDefault()
-                          const file = e.dataTransfer.files?.[0]
-                          if (file) void loadImportSource({ kind: 'file', file, name: file.name })
+                          const files = Array.from(e.dataTransfer.files || [])
+                          if (files.length > 0) {
+                            void loadImportSources(
+                              files.map((file) => ({ kind: 'file' as const, file, name: file.name })),
+                            )
+                          }
                         }}
                       >
                         <FileInput className="w-12 h-12 mx-auto text-text-muted mb-4" />
-                        <p className="text-text-secondary mb-2">Click to select a file or drag and drop</p>
+                        <p className="text-text-secondary mb-2">Select multiple files or drop them here</p>
                         <p className="text-xs text-text-muted">
-                          Supports JSON, CSV, Excel (.xlsx/.xls) and PDF
+                          Supports JSON, CSV, Excel (.xlsx/.xls) and PDF · headers auto-detected on any row
                         </p>
                       </div>
                       {importError && (
@@ -746,16 +788,21 @@ export function QuotesList() {
                   <div className="space-y-6">
                     <div className="flex items-center justify-between p-4 glass-hover rounded-xl gap-3">
                       <div className="min-w-0">
-                        <p className="font-medium text-text-primary truncate">{importSource.name}</p>
+                        <p className="font-medium text-text-primary truncate">
+                          {importSources.map((source) => source.name).join(', ')}
+                        </p>
                         <p className="text-xs text-text-muted">
                           {importRows.length} row{importRows.length === 1 ? '' : 's'} detected ·{' '}
                           {importedHeaderPreview(importRows).slice(0, 8).join(', ') || 'no columns'}
                         </p>
+                        {importWarnings.length > 0 && (
+                          <p className="text-xs text-warning mt-1">{importWarnings.join(' · ')}</p>
+                        )}
                       </div>
                       <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
-                        onClick={() => { setImportSource(null); setImportRows([]); setImportError(''); setImportStatus('idle') }}
+                        onClick={() => { setImportSources([]); setImportRows([]); setImportGroups([]); setImportWarnings([]); setImportError(''); setImportStatus('idle') }}
                         className="glass-hover px-3 py-1.5 rounded-lg text-sm text-text-secondary hover:text-error shrink-0"
                       >
                         <X className="w-4 h-4 mr-1" />
@@ -767,7 +814,11 @@ export function QuotesList() {
                       <div className="space-y-4 text-center">
                         <CheckCircle className="w-16 h-16 mx-auto text-success" />
                         <p className="font-medium text-text-primary">Import Complete!</p>
-                        <p className="text-sm text-text-muted">Quotations imported successfully with 15% VAT in SAR.</p>
+                        <p className="text-sm text-text-muted">
+                          {importTarget === 'quotations'
+                            ? 'Quotations imported successfully with 15% VAT in SAR.'
+                            : 'Price book entries imported successfully.'}
+                        </p>
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
@@ -793,6 +844,20 @@ export function QuotesList() {
                       </div>
                     ) : (
                       <>
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-sm font-medium text-text-secondary" htmlFor="import-target">
+                            Import rows as
+                          </label>
+                          <select
+                            id="import-target"
+                            value={importTarget}
+                            onChange={(e) => setImportTarget(e.target.value as ImportTarget)}
+                            className="glass-hover px-3 py-2 rounded-xl text-sm focus-ring border border-border-subtle bg-bg-secondary"
+                          >
+                            <option value="quotations">Quotations (with line items)</option>
+                            <option value="priceBook">Price Book entries</option>
+                          </select>
+                        </div>
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
@@ -800,7 +865,9 @@ export function QuotesList() {
                           className="w-full glass-hover p-4 rounded-xl border-2 border-border-subtle hover:border-primary/50 transition-colors"
                         >
                           <FileInput className="w-6 h-6 mx-auto text-primary mb-2" />
-                          <p className="font-medium text-text-primary">Import Quotations</p>
+                          <p className="font-medium text-text-primary">
+                            Import {importTarget === 'quotations' ? 'Quotations' : 'Price Book Items'}
+                          </p>
                           <p className="text-xs text-text-muted mt-1">Auto-detect and import</p>
                         </motion.button>
                         {importStatus === 'importing' && (

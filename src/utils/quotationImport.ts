@@ -1,14 +1,13 @@
 import { parseNumeric } from '@/utils/pricebook'
 import { generateId } from '@/utils/formatters'
+import { defaultPdfHeading } from '@/utils/uicFormats'
 import type { Client, Quotation, QuotationItem, Settings } from '@/types'
 
 /**
- * Shared, defensive import helpers for quotations.
- *
- * All parsers return plain row objects and never throw on empty or malformed
- * input. `normalizeImportedQuotation` is the single place where a loose row
- * becomes a fully populated Quotation, so every supported format (JSON, CSV,
- * Excel, PDF) maps fields the same way.
+ * Defensive, format-flexible import helpers shared by quotation, line-item and
+ * price book imports. Parsers return loose row objects; mapping functions turn
+ * those rows into typed items. Nothing here throws on empty or malformed input
+ * except a scanned/empty PDF, which produces an explicit, user-facing error.
  */
 
 export type ImportSource =
@@ -16,6 +15,9 @@ export type ImportSource =
   | { kind: 'file'; file: File; name: string }
 
 type UnknownRecord = Record<string, unknown>
+
+export const SCANNED_PDF_MESSAGE =
+  'This PDF has little or no extractable text (it may be a scanned image). Use an Excel/CSV file or OCR the PDF first.'
 
 const isRecord = (value: unknown): value is UnknownRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -40,7 +42,6 @@ function textValue(value: unknown, fallback = ''): string {
   if (value === undefined || value === null) return fallback
   if (typeof value === 'string') return value.trim() || fallback
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  // Nested objects are handled by the client/item mappers, not here.
   return Array.isArray(value) ? value.map((entry) => String(entry ?? '')).join(', ') : fallback
 }
 
@@ -64,9 +65,39 @@ function asStatus(value: unknown): Quotation['status'] {
 
 function asStatusTracking(value: unknown): Quotation['statusTracking'] {
   const normalized = textValue(value).toLowerCase()
-  return (
-    VALID_STATUS_TRACKING.find((status) => status.toLowerCase() === normalized) || 'Draft'
-  )
+  return VALID_STATUS_TRACKING.find((status) => status.toLowerCase() === normalized) || 'Draft'
+}
+
+const NON_EQUIPMENT_PATTERNS: RegExp[] = [
+  /\bsample\s*(holding|storage|retention|note|bottle|container)\b/i,
+  /\bsamples?\b[^.]{0,60}\b(held|stored|retained|kept)\b/i,
+  /\b(held|stored|retained|kept)\s+for\s+\d+\s+days?\b/i,
+  /\bdays?\s+after\s+(collection|receipt|sampling)\b/i,
+  /\bholding\s*(days|period|time|charges)\b/i,
+  /\bbottle\b/i,
+  /\b(terms\s*(and|&)?\s*conditions?|important\s+note|confidentiality|policy|clause)\b/i,
+  /^\s*(ref(erence)?\.?|ref\s*(no\.?)?|po\s*(no\.?)?|quote\s*(no\.?)?|quotation\s*(no\.?)?)\s*[:#-]?\s*[\w\-\/]+\s*$/i,
+  /^\s*(page\s*\d+|date\s*[:.]|attn\s*to\s*:)/i,
+  /\b(dear\s+sir|thanks\s*(and|&)?\s*best\s+regards|we\s+hope|purchase\s+order|vat\s+amount|net\s+total|total\s+amount)\b/i,
+  /^\s*\d{1,3}[.)]\s+[A-Za-z]/,
+]
+
+/** True for prose/policy/reference lines that must never become equipment rows. */
+export function isNonEquipmentLine(value: string): boolean {
+  const text = value.trim()
+  if (!text) return true
+  if (NON_EQUIPMENT_PATTERNS.some((pattern) => pattern.test(text))) return true
+  // A bare reference code/number with no description.
+  if (!/\s/.test(text) && /\d/.test(text) && text.length <= 30) return true
+  return false
+}
+
+/** Turns `88953-Powerline Solutions Gen.Cont.xlsx` into `Powerline Solutions Gen.Cont`. */
+export function clientNameFromFileName(fileName: string): string {
+  let name = fileName.replace(/\.[^.]+$/, '').replace(/^\uFEFF/, '')
+  name = name.replace(/^\s*\d{4,}\s*[-–—_:]\s*/, '').trim()
+  name = name.replace(/^\s*[A-Za-z]{1,4}\s*-?\s*\d{2,}\s*[-–—_:]\s*/, '').trim()
+  return name
 }
 
 /** Split a CSV row while honouring quoted cells, escaped quotes and CRLF. */
@@ -94,31 +125,108 @@ function splitCsvLine(line: string): string[] {
   return cells
 }
 
+/** Flexible column aliases — header text is normalized to lowercase alphanumerics. */
+const ITEM_ALIASES: Record<string, string[]> = {
+  description: [
+    'description', 'item', 'itemdescription', 'equipment', 'equipmentdescription',
+    'service', 'servicedescription', 'particulars', 'details', 'product',
+    'productname', 'name', 'workdescription',
+  ],
+  quantity: ['quantity', 'qty', 'q', 'nos', 'no', 'noofitems', 'sno', 'sno'],
+  rate: [
+    'rate', 'unitrate', 'price', 'unitprice', 'unitrateinsar', 'unitrateinsr',
+    'rateinsar', 'ratesar', 'priceinsar', 'unitcost', 'cost',
+  ],
+  amount: ['amount', 'lineamount', 'total', 'totalamount', 'amountinsar', 'amountsar', 'value'],
+  unit: ['unit', 'uom', 'unitofmeasure', 'units'],
+  size: ['size', 'sizeinch', 'sizeinches', 'sizein', 'pipesize'],
+  class: ['class', 'classrating', 'rating', 'classratings'],
+  remarks: ['remarks', 'remark', 'note', 'notes', 'comment', 'comments'],
+  serial: ['serialno', 'serialnumber', 'serial', 'serno', 'sn', 'serialnumbers'],
+  category: ['category', 'type', 'group', 'itemcategory', 'servicecategory'],
+  taxRate: ['taxrate', 'vat', 'vatrate', 'tax', 'taxpercent', 'vatpercent'],
+  quoteNumber: ['quotenumber', 'quotationnumber', 'quoteno', 'quote', 'number', 'ref'],
+  client: ['client', 'clientname', 'customer', 'customername', 'company', 'companyname', 'clientcompany', 'attnto', 'attn', 'buyer'],
+  date: ['date', 'quotedate', 'quotationdate'],
+}
+
+function matchesAlias(cell: unknown, aliases: string[]): boolean {
+  const key = normalizeKey(textValue(cell))
+  return Boolean(key && aliases.some((alias) => normalizeKey(alias) === key))
+}
+
+function isFooterRow(cells: unknown[]): boolean {
+  if (cells.some((cell) => typeof cell === 'string' && cell.trim().startsWith('='))) return true
+  const normalized = cells.map((cell) => textValue(cell).trim().toLowerCase())
+  const footerLabels = new Set([
+    'total', 'grand total', 'subtotal', 'sub total', 'net total', 'total amount',
+    'summary', 'balance due', 'amount due', 'total qty', 'requested total quantities',
+    'vat amount', 'vat', 'tax', 'sum',
+  ])
+  if (normalized.some((cell) => footerLabels.has(cell))) return true
+  return normalized.some((cell) => /^(total|subtotal|net total|grand total|vat|summary)\s*[:(]/i.test(cell))
+}
+
+/**
+ * Converts a raw spreadsheet/CSV matrix into records. The header row is
+ * detected by scoring alias matches, so it can sit on row 8 (or later) and
+ * column A may be blank. Footer/summary rows are dropped.
+ */
+export function rowsFromMatrix(matrix: unknown[][]): UnknownRecord[] {
+  const usable = matrix.filter((row) => Array.isArray(row) && row.some((cell) => textValue(cell)))
+  if (usable.length === 0) return []
+
+  let headerIndex = 0
+  let bestScore = -1
+  const scanLimit = Math.min(usable.length, 40)
+  for (let index = 0; index < scanLimit; index += 1) {
+    const cells = usable[index]
+    const score = Object.values(ITEM_ALIASES).reduce(
+      (total, aliases) => total + (cells.some((cell) => matchesAlias(cell, aliases)) ? 1 : 0),
+      0,
+    )
+    if (score > bestScore) {
+      bestScore = score
+      headerIndex = index
+    }
+    if (score >= 4) break
+  }
+
+  const headerCells = usable[headerIndex]
+  const headerKeys = headerCells.map((cell, index) => {
+    const key = normalizeKey(textValue(cell))
+    return key || `column${index + 1}`
+  })
+
+  const rows: UnknownRecord[] = []
+  for (let index = headerIndex + 1; index < usable.length; index += 1) {
+    const cells = usable[index]
+    if (isFooterRow(cells)) continue
+    const row: UnknownRecord = {}
+    cells.forEach((cell, columnIndex) => {
+      const key = headerKeys[columnIndex] || `column${columnIndex + 1}`
+      row[key] = cell
+    })
+    const hasContent = Object.values(row).some((value) => textValue(value) !== '')
+    if (hasContent) rows.push(row)
+  }
+  return rows
+}
+
 export function parseCsvRows(content: string): UnknownRecord[] {
-  const lines = content
+  const matrix = content
     .replace(/^\uFEFF/, '')
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0)
-  if (lines.length < 2) return []
-
-  const headers = splitCsvLine(lines[0]).map((header) => normalizeKey(header))
-  if (headers.every((header) => !header)) return []
-
-  return lines.slice(1).map((line) => {
-    const values = splitCsvLine(line)
-    const row: UnknownRecord = {}
-    headers.forEach((header, index) => {
-      if (header) row[header] = values[index] ?? ''
-    })
-    return row
-  })
+    .map((line) => splitCsvLine(line))
+  return rowsFromMatrix(matrix)
 }
 
 function extractRowsFromJson(data: unknown): UnknownRecord[] {
   if (Array.isArray(data)) return data.filter(isRecord)
   if (!isRecord(data)) return []
 
-  const candidates = ['quotations', 'quotes', 'items', 'rows', 'records', 'data']
+  const candidates = ['quotations', 'quotes', 'items', 'rows', 'records', 'data', 'lineItems']
   for (const key of candidates) {
     const candidate = data[key]
     if (Array.isArray(candidate)) return candidate.filter(isRecord)
@@ -132,7 +240,6 @@ function extractRowsFromJson(data: unknown): UnknownRecord[] {
     }
   }
 
-  // A single quotation object.
   if ('quoteNumber' in data || 'client' in data || 'items' in data) return [data]
 
   const values = Object.values(data).filter(isRecord)
@@ -148,25 +255,56 @@ async function rowsFromWorkbook(
 ): Promise<UnknownRecord[]> {
   const XLSX = await import('xlsx')
   const workbook = XLSX.read(input, { type })
-  const sheetName = workbook.SheetNames[0]
-  if (!sheetName || !workbook.Sheets[sheetName]) return []
-  return XLSX.utils.sheet_to_json<UnknownRecord>(workbook.Sheets[sheetName], {
-    defval: '',
-    raw: false,
-  })
+  const rows: UnknownRecord[] = []
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) continue
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      defval: '',
+      blankrows: false,
+      raw: true,
+    })
+    rows.push(...rowsFromMatrix(matrix))
+  }
+  return rows
 }
 
-interface PdfTextItem {
-  str?: string
-  transform?: number[]
+interface PdfWord {
+  text: string
+  x: number
+  y: number
 }
 
-/**
- * Best-effort PDF mapping: labeled fields become quotation fields, and rows
- * ending in three numeric cells become line items. Unknown or empty PDFs yield
- * an empty array instead of throwing.
- */
-export async function extractPdfRows(bytes: Uint8Array): Promise<UnknownRecord[]> {
+interface PdfLine {
+  text: string
+  cells: string[]
+}
+
+interface ExtractedPdf {
+  fields: UnknownRecord
+  items: UnknownRecord[]
+  lines: PdfLine[]
+}
+
+function splitLineCells(words: PdfWord[]): string[] {
+  const cells: string[] = []
+  let current = ''
+  let previousEnd: number | null = null
+  for (const word of [...words].sort((a, b) => a.x - b.x)) {
+    const gap = previousEnd === null ? 0 : word.x - previousEnd
+    if (previousEnd !== null && gap > 12 && current.trim()) {
+      cells.push(current.trim())
+      current = ''
+    }
+    current += `${current ? ' ' : ''}${word.text}`
+    previousEnd = word.x + Math.max(6, word.text.length * 2.6)
+  }
+  if (current.trim()) cells.push(current.trim())
+  return cells
+}
+
+async function extractPdfContent(bytes: Uint8Array): Promise<ExtractedPdf> {
   const [pdfjs, worker] = await Promise.all([
     import('pdfjs-dist'),
     import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
@@ -174,89 +312,138 @@ export async function extractPdfRows(bytes: Uint8Array): Promise<UnknownRecord[]
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default
 
   const pdf = await pdfjs.getDocument({ data: bytes }).promise
-  const lines: string[] = []
-
+  const words: PdfWord[] = []
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber)
     const content = await page.getTextContent()
-    const byPosition = new Map<number, string[]>()
-    for (const entry of content.items as PdfTextItem[]) {
-      const value = String(entry.str ?? '').trim()
-      if (!value) continue
-      const y = Math.round(entry.transform?.[5] ?? 0)
-      const parts = byPosition.get(y) || []
-      parts.push(value)
-      byPosition.set(y, parts)
-    }
-    const pageLines = [...byPosition.entries()]
-      .sort((a, b) => b[0] - a[0])
-      .map(([, parts]) => parts.join(' ').trim())
-      .filter(Boolean)
-    lines.push(...pageLines)
-  }
-
-  if (lines.length === 0) return []
-
-  const fieldAliases = new Map<string, string>([
-    ['quotenumber', 'quoteNumber'],
-    ['quoteno', 'quoteNumber'],
-    ['quotationnumber', 'quoteNumber'],
-    ['number', 'quoteNumber'],
-    ['ref', 'ref'],
-    ['reference', 'ref'],
-    ['date', 'date'],
-    ['client', 'client'],
-    ['clientname', 'clientName'],
-    ['customer', 'clientName'],
-    ['company', 'clientCompany'],
-    ['email', 'clientEmail'],
-    ['phone', 'clientPhone'],
-    ['address', 'clientAddress'],
-    ['vatnumber', 'clientVatNumber'],
-    ['project', 'project'],
-    ['title', 'title'],
-    ['notes', 'notes'],
-    ['terms', 'terms'],
-    ['status', 'status'],
-  ])
-
-  const draft: UnknownRecord = {}
-  const items: QuotationItem[] = []
-
-  for (const line of lines) {
-    const separator = line.indexOf(':')
-    if (separator > 0) {
-      const key = normalizeKey(line.slice(0, separator))
-      const value = line.slice(separator + 1).trim()
-      const field = fieldAliases.get(key)
-      if (field && value) {
-        draft[field] = value
-        continue
-      }
-    }
-
-    const cells = line
-      .split(/\s{2,}|\t+/)
-      .map((cell) => cell.trim())
-      .filter(Boolean)
-    if (cells.length >= 4) {
-      const numbers = cells.slice(-3).map(parseNumeric)
-      if (numbers.every((number) => Number.isFinite(number))) {
-        items.push({
-          id: generateId(),
-          description: cells.slice(0, -3).join(' '),
-          quantity: numbers[0],
-          unit: 'PCS',
-          rate: numbers[1],
-          amount: numbers[2],
-        })
-      }
+    for (const entry of content.items as Array<{ str?: string; transform?: number[] }>) {
+      const text = String(entry.str ?? '').trim()
+      if (!text) continue
+      words.push({
+        text,
+        x: entry.transform?.[4] ?? 0,
+        y: entry.transform?.[5] ?? 0,
+      })
     }
   }
 
-  if (Object.keys(draft).length === 0 && items.length === 0) return []
-  draft.items = items
-  return [draft]
+  const alphaCount = words.reduce(
+    (total, word) => total + (word.text.match(/[A-Za-z]/g)?.length || 0),
+    0,
+  )
+  if (words.length === 0 || alphaCount < 12) throw new Error(SCANNED_PDF_MESSAGE)
+
+  const groups = new Map<number, PdfWord[]>()
+  for (const word of words) {
+    const key = Math.round(word.y / 2) * 2
+    const group = groups.get(key) || []
+    group.push(word)
+    groups.set(key, group)
+  }
+  const lines: PdfLine[] = [...groups.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([, group]) => {
+      const sorted = [...group].sort((a, b) => a.x - b.x)
+      return { text: sorted.map((word) => word.text).join(' ').trim(), cells: splitLineCells(sorted) }
+    })
+    .filter((line) => line.text)
+
+  return { fields: {}, items: [], lines }
+}
+
+/** Extracts structured quotation/equipment rows from any text-based PDF layout. */
+export async function extractPdfRows(bytes: Uint8Array): Promise<UnknownRecord[]> {
+  const { lines } = await extractPdfContent(bytes)
+  if (lines.length === 0) throw new Error(SCANNED_PDF_MESSAGE)
+
+  let headerIndex = -1
+  let bestScore = 0
+  lines.forEach((line, index) => {
+    const score = Object.values(ITEM_ALIASES).reduce(
+      (total, aliases) => total + (line.cells.some((cell) => matchesAlias(cell, aliases)) ? 1 : 0),
+      0,
+    )
+    if (score > bestScore) {
+      bestScore = score
+      headerIndex = index
+    }
+  })
+
+  const rows: UnknownRecord[] = []
+  if (bestScore >= 2 && headerIndex >= 0) {
+    const headerKeys = lines[headerIndex].cells.map((cell, index) => {
+      const key = normalizeKey(cell)
+      return key || `column${index + 1}`
+    })
+    for (const line of lines.slice(headerIndex + 1)) {
+      if (isFooterRow(line.cells) || isNonEquipmentLine(line.text)) continue
+      const row: UnknownRecord = {}
+      line.cells.forEach((cell, index) => {
+        row[headerKeys[index] || `column${index + 1}`] = cell
+      })
+      rows.push(row)
+    }
+  }
+
+  if (rows.length === 0) {
+    const draft: UnknownRecord = {}
+    const fieldAliases: Array<[string, string[]]> = [
+      ['quoteNumber', ITEM_ALIASES.quoteNumber],
+      ['client', ITEM_ALIASES.client],
+      ['date', ITEM_ALIASES.date],
+      ['ref', ['ref', 'reference']],
+      ['project', ['project']],
+      ['location', ['location']],
+      ['title', ['title', 'subject']],
+    ]
+    for (const line of lines) {
+      const separator = line.text.indexOf(':')
+      if (separator <= 0) continue
+      const key = normalizeKey(line.text.slice(0, separator))
+      const value = line.text.slice(separator + 1).trim()
+      const field = fieldAliases.find(([, aliases]) =>
+        aliases.some((alias) => normalizeKey(alias) === key),
+      )
+      if (field && value) draft[field[0]] = value
+    }
+
+    for (const line of lines) {
+      if (isFooterRow(line.cells)) continue
+      const numbers = line.text.match(/-?\d+(?:[.,]\d+)*/g) || []
+      if (numbers.length < 1) continue
+      const numericCount = numbers.reduce((total, token) => total + token.length, 0)
+      const words = line.text.replace(/[^\w\s]/g, ' ').trim().split(/\s+/).filter(Boolean).length
+      if (words < 2 && numericCount < 4) continue
+
+      const serialMatch = line.text.match(/(?:S\/N|Serial\s*No\.?|Serial)[\s:#-]*([A-Za-z0-9-]+)/i)
+      const sizeMatch = line.text.match(/(\d+(?:\.\d+)?)\s*(?:"|inch|inches)\b/i)
+      const classMatch = line.text.match(/\bClass\s*([A-Za-z0-9]+)/i)
+      const qty = parseNumeric(numbers[0])
+      const rate = numbers.length > 1 ? parseNumeric(numbers[1]) : NaN
+      const amount = numbers.length > 2 ? parseNumeric(numbers[2]) : NaN
+      const description = line.text
+        .replace(numbers[0] || '', '')
+        .replace(/\s+/g, ' ')
+        .trim() || line.text.trim()
+      if (isNonEquipmentLine(description)) continue
+
+      rows.push({
+        description,
+        quantity: Number.isFinite(qty) ? qty : 1,
+        rate: Number.isFinite(rate) ? rate : 0,
+        amount: Number.isFinite(amount) ? amount : undefined,
+        sizeInch: sizeMatch ? sizeMatch[1] : '',
+        classRating: classMatch ? classMatch[1] : '',
+        serialNo: serialMatch ? serialMatch[1] : '',
+      })
+    }
+
+    if (rows.length > 0) draft.items = rows
+    if (Object.keys(draft).length === 0) throw new Error(SCANNED_PDF_MESSAGE)
+    return [draft]
+  }
+
+  return rows
 }
 
 async function readBytes(source: ImportSource): Promise<Uint8Array> {
@@ -271,7 +458,7 @@ async function readBytes(source: ImportSource): Promise<Uint8Array> {
   return bytes
 }
 
-/** Reads any supported quotation import source into loose row objects. */
+/** Reads one import source into loose row objects. */
 export async function readQuotationImportRows(source: ImportSource): Promise<UnknownRecord[]> {
   const extension = extensionOf(source.name)
 
@@ -315,65 +502,139 @@ export async function readQuotationImportRows(source: ImportSource): Promise<Unk
   throw new Error(`Unsupported file type: .${extension || '?'}`)
 }
 
+export interface ImportGroup {
+  source: ImportSource
+  rows: UnknownRecord[]
+  clientName: string
+}
+
+/** Infers a distinct client/company name for one imported file. */
+export function inferClientName(source: ImportSource, rows: UnknownRecord[]): string {
+  for (const row of rows) {
+    for (const alias of ITEM_ALIASES.client) {
+      const value = textValue(pickField(row, [alias]))
+      if (value && !/^(unknown client|unknown|n\/a|-)$/i.test(value)) return value
+    }
+    const description = textValue(pickField(row, ITEM_ALIASES.description))
+    const embedded = description.match(/(?:Attn\s*To|Client|Customer|Company)\s*:\s*([A-Za-z][A-Za-z0-9 .&'\-]{2,80})/i)
+    if (embedded && !isNonEquipmentLine(embedded[1])) return embedded[1].trim()
+  }
+  const fromFileName = clientNameFromFileName(source.name)
+  if (fromFileName) return fromFileName
+  return 'Imported Client'
+}
+
+/** Reads several files in one pass, keeping each file's rows grouped with its own client. */
+export async function readImportSources(
+  sources: ImportSource[],
+): Promise<{ rows: UnknownRecord[]; groups: ImportGroup[]; errors: string[]; files: string[] }> {
+  const rows: UnknownRecord[] = []
+  const groups: ImportGroup[] = []
+  const errors: string[] = []
+  const files: string[] = []
+  for (const source of sources) {
+    try {
+      const parsed = await readQuotationImportRows(source)
+      rows.push(...parsed)
+      files.push(source.name)
+      groups.push({ source, rows: parsed, clientName: inferClientName(source, parsed) })
+    } catch (error) {
+      errors.push(`${source.name}: ${error instanceof Error ? error.message : 'Could not read file'}`)
+    }
+  }
+  return { rows, groups, errors, files }
+}
+
 export function importedHeaderPreview(rows: UnknownRecord[]): string[] {
   const headers = new Set<string>()
   for (const row of rows.slice(0, 5)) {
     for (const key of Object.keys(row)) {
-      if (key && key !== 'items') headers.add(key)
+      if (key && key !== 'items' && !key.startsWith('column')) headers.add(key)
     }
   }
   return [...headers]
 }
 
-function mapClient(value: unknown, row: UnknownRecord): Client {
+/** Maps any flexible row into an editable quotation line item. */
+export function mapFlexibleItem(row: UnknownRecord, index = 0): QuotationItem | null {
+  if (!isRecord(row)) return null
+  const rawDescription = textValue(pickField(row, ITEM_ALIASES.description))
+  const serialFromText = rawDescription.match(/(?:S\/N|Serial\s*No\.?|Serial)[\s:#-]*([A-Za-z0-9-]+)/i)
+  const serialNo = textValue(pickField(row, ITEM_ALIASES.serial)) || (serialFromText ? serialFromText[1] : '')
+  let description = rawDescription
+  if (serialNo && !description.toLowerCase().includes('s/n')) {
+    description = `${description} ${serialNo ? `S/N: ${serialNo}` : ''}`.trim()
+  }
+  if (!description || isNonEquipmentLine(description)) return null
+
+  const quantity = parseNumeric(pickField(row, ITEM_ALIASES.quantity))
+  const rate = parseNumeric(pickField(row, ITEM_ALIASES.rate))
+  const amount = parseNumeric(pickField(row, ITEM_ALIASES.amount))
+  const sNo = parseNumeric(pickField(row, ['sno', 'itemno', 'itemnumber']))
+  const taxRate = parseNumeric(pickField(row, ITEM_ALIASES.taxRate))
+  const safeQuantity = Number.isFinite(quantity) && quantity !== 0 ? quantity : 1
+  const safeRate = Number.isFinite(rate) ? rate : (Number.isFinite(amount) ? amount / safeQuantity : 0)
+
+  return {
+    id: textValue(pickField(row, ['id', 'itemid']), generateId()) || generateId(),
+    description,
+    quantity: safeQuantity,
+    unit: textValue(pickField(row, ITEM_ALIASES.unit), 'PCS') || 'PCS',
+    rate: safeRate,
+    amount: Number.isFinite(amount) ? amount : safeQuantity * safeRate,
+    taxRate: Number.isFinite(taxRate) ? taxRate : 15,
+    taxAmount: Number.isFinite(taxRate) ? (safeQuantity * safeRate * taxRate) / 100 : undefined,
+    sizeInch: textValue(pickField(row, ITEM_ALIASES.size)),
+    classRating: textValue(pickField(row, ITEM_ALIASES.class)),
+    remarks: textValue(pickField(row, ITEM_ALIASES.remarks)),
+    serialNo: serialNo || undefined,
+    sNo: Number.isFinite(sNo) ? sNo : index + 1,
+  }
+}
+
+/** Maps flexible equipment columns onto canonical price book fields. */
+export function mapFlexiblePriceBookRow(row: UnknownRecord): UnknownRecord {
+  const item = mapFlexibleItem(row)
+  if (!item) return {}
+  const extras = [item.sizeInch ? `Size ${item.sizeInch}` : '', item.classRating ? `Class ${item.classRating}` : '', item.serialNo ? `S/N ${item.serialNo}` : '']
+    .filter(Boolean)
+    .join(' | ')
+  return {
+    description: item.description.replace(/\s+S\/N:.*$/i, '').trim() || item.description,
+    category: textValue(pickField(row, ITEM_ALIASES.category), 'Other') || 'Other',
+    unit: item.unit,
+    rate: item.rate,
+    taxRate: item.taxRate ?? 15,
+    serviceRef: extras || textValue(pickField(row, ['serviceref', 'hsncode', 'code'])),
+  }
+}
+
+function mapClient(value: unknown, row: UnknownRecord, overrideName?: string): Client {
   const source = isRecord(value) ? value : {}
-  const name = textValue(pickField(source, ['name', 'clientName'])) ||
-    textValue(pickField(row, ['clientName', 'client', 'customer', 'customerName'])) ||
+  const name =
+    (overrideName && /^(unknown client|unknown|n\/a|-)$/i.test(overrideName) ? '' : overrideName) ||
+    textValue(pickField(source, ['name', 'clientName'])) ||
+    textValue(pickField(row, ITEM_ALIASES.client)) ||
     'Imported Client'
   return {
-    id: textValue(pickField(source, ['id', 'clientId']), generateId()) || generateId(),
+    id:
+      textValue(pickField(source, ['id', 'clientId'])) ||
+      `client-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`,
     name,
     email: textValue(pickField(source, ['email', 'clientEmail']) || pickField(row, ['clientEmail', 'email'])),
     phone: textValue(pickField(source, ['phone', 'clientPhone']) || pickField(row, ['clientPhone', 'phone'])),
     address: textValue(pickField(source, ['address', 'clientAddress']) || pickField(row, ['clientAddress', 'address'])),
     vatNumber: textValue(pickField(source, ['vatNumber', 'vat', 'taxNumber']) || pickField(row, ['clientVatNumber', 'vatNumber'])),
-    company: textValue(pickField(source, ['company', 'companyName']) || pickField(row, ['clientCompany', 'company'])),
+    company:
+      textValue(pickField(source, ['company', 'companyName']) || pickField(row, ['clientCompany', 'company'])) || name,
     contactPerson: textValue(pickField(source, ['contactPerson', 'attnTo']) || pickField(row, ['attnTo', 'contactPerson'])),
-  }
-}
-
-function mapLineItem(value: unknown, index: number): QuotationItem | null {
-  if (!isRecord(value)) return null
-  const description = textValue(pickField(value, ['description', 'item', 'particulars', 'service', 'name']))
-  if (!description) return null
-  const quantity = parseNumeric(pickField(value, ['quantity', 'qty', 'no', 'sNo']))
-  const rate = parseNumeric(pickField(value, ['rate', 'unitRate', 'price', 'unitPrice']))
-  const rawAmount = parseNumeric(pickField(value, ['amount', 'total', 'lineTotal']))
-  const safeQuantity = Number.isFinite(quantity) ? quantity : 1
-  const safeRate = Number.isFinite(rate) ? rate : 0
-  const taxRate = parseNumeric(pickField(value, ['taxRate', 'vatRate', 'tax', 'vat']))
-  const taxAmount = parseNumeric(pickField(value, ['taxAmount', 'vatAmount']))
-  return {
-    id: textValue(pickField(value, ['id', 'itemId']), generateId()) || generateId(),
-    description,
-    quantity: safeQuantity,
-    unit: textValue(pickField(value, ['unit', 'uom']), 'PCS') || 'PCS',
-    rate: safeRate,
-    amount: Number.isFinite(rawAmount) ? rawAmount : safeQuantity * safeRate,
-    taxRate: Number.isFinite(taxRate) ? taxRate : undefined,
-    taxAmount: Number.isFinite(taxAmount) ? taxAmount : undefined,
-    hsnCode: textValue(pickField(value, ['hsnCode', 'hsn', 'serviceRef', 'code'])),
-    sizeInch: textValue(pickField(value, ['sizeInch', 'size'])),
-    classRating: textValue(pickField(value, ['classRating', 'class', 'rating'])),
-    remarks: textValue(pickField(value, ['remarks', 'note'])),
-    sNo: Number.isFinite(parseNumeric(pickField(value, ['sNo', 'serialNo']))) ? parseNumeric(pickField(value, ['sNo', 'serialNo'])) : index + 1,
   }
 }
 
 /** Converts one loose imported row into a complete, renderable Quotation. */
 export function normalizeImportedQuotation(
   raw: unknown,
-  options: { settings: Settings; index?: number; now?: Date } | undefined,
+  options: { settings: Settings; index?: number; now?: Date; clientName?: string } | undefined,
 ): Quotation | null {
   if (!isRecord(raw)) return null
 
@@ -389,17 +650,21 @@ export function normalizeImportedQuotation(
 
   const rawItems = pickField(row, ['items', 'lineItems', 'quotationItems'])
   const items: QuotationItem[] = Array.isArray(rawItems)
-    ? rawItems.map(mapLineItem).filter((item): item is QuotationItem => item !== null)
+    ? rawItems.map((item, itemIndex) => mapFlexibleItem(isRecord(item) ? item : {}, itemIndex)).filter((item): item is QuotationItem => item !== null)
     : []
 
-  const inlineItem = mapLineItem(row, 0)
+  const inlineItem = mapFlexibleItem(row, 0)
   if (items.length === 0 && inlineItem) items.push(inlineItem)
 
+  const type: Quotation['type'] =
+    textValue(pickField(row, ['type'])).toLowerCase() === 'valve' ||
+    /hydro/i.test(textValue(pickField(row, ['pdfHeading', 'title', 'subject'])))
+      ? 'valve'
+      : 'standard'
   const quoteNumber =
-    textValue(pickField(row, ['quoteNumber', 'quotationNumber', 'quoteNo', 'number', 'ref'])) ||
+    textValue(pickField(row, ITEM_ALIASES.quoteNumber)) ||
     `IMP-${today.replace(/-/g, '')}-${String(index + 1).padStart(4, '0')}`
-
-  const client = mapClient(pickField(row, ['client', 'customer']), row)
+  const client = mapClient(pickField(row, ['client', 'customer']), row, options?.clientName)
 
   const subtotalRaw = parseNumeric(pickField(row, ['subtotal', 'subTotal', 'netAmount']))
   const taxRaw = parseNumeric(pickField(row, ['tax', 'vatAmount', 'taxAmount']))
@@ -416,16 +681,16 @@ export function normalizeImportedQuotation(
 
   const vatRaw = parseNumeric(pickField(row, ['vat', 'vatRate', 'taxRate', 'tax']))
   const vat = Number.isFinite(vatRaw) && vatRaw > 0 ? vatRaw : defaultTaxRate
-
   const scopeOfWork = pickField(row, ['scopeOfWork', 'scope'])
   const clientProvisions = pickField(row, ['clientProvisions', 'provisions'])
   const annexurePages = pickField(row, ['annexurePages', 'annexures'])
+  const signatureOption = textValue(pickField(row, ['signatureOption'])).toLowerCase()
 
   return {
     id: textValue(pickField(row, ['id', 'quoteId']), generateId()) || generateId(),
-    type: textValue(pickField(row, ['type'])).toLowerCase() === 'valve' ? 'valve' : 'standard',
+    type,
     quoteNumber,
-    date: isoDate(pickField(row, ['date', 'quoteDate', 'createdAt']), today),
+    date: isoDate(pickField(row, ITEM_ALIASES.date), today),
     client,
     items,
     subtotal,
@@ -434,7 +699,7 @@ export function normalizeImportedQuotation(
     status: asStatus(pickField(row, ['status'])),
     notes: textValue(pickField(row, ['notes', 'note'])),
     terms: textValue(pickField(row, ['terms', 'paymentTerms']), settings?.defaults.paymentTerms || 'Net 30'),
-    createdAt: isoDate(pickField(row, ['createdAt']), createdAt) + 'T00:00:00.000Z',
+    createdAt: `${isoDate(pickField(row, ['createdAt']), today)}T00:00:00.000Z`,
     updatedAt: createdAt,
     serialNumber: textValue(pickField(row, ['serialNumber', 'serialNo'])),
     annexurePages: Array.isArray(annexurePages)
@@ -445,7 +710,6 @@ export function normalizeImportedQuotation(
           order: pageIndex + 1,
         }))
       : [],
-    // V1 fields — preserved so imported quotes open correctly in QuoteEditor.
     title: textValue(pickField(row, ['title', 'subject']), 'Hydro Test Services'),
     attnTo: textValue(pickField(row, ['attnTo', 'attention'])),
     ref: textValue(pickField(row, ['ref', 'reference'])),
@@ -456,20 +720,14 @@ export function normalizeImportedQuotation(
       pickField(row, ['introParagraph', 'intro']),
       'We are pleased to submit our quotation for the following services:',
     ),
-    vatNote: textValue(
-      pickField(row, ['vatNote']),
-      `${vat}% VAT will be charged extra as per KSA regulations.`,
-    ),
+    vatNote: textValue(pickField(row, ['vatNote']), `${vat}% VAT will be charged extra as per KSA regulations.`),
     scopeOfWork: Array.isArray(scopeOfWork)
       ? scopeOfWork.map((entry) => textValue(entry)).filter(Boolean)
       : [],
     clientProvisions: Array.isArray(clientProvisions)
       ? clientProvisions.map((entry) => textValue(entry)).filter(Boolean)
       : [],
-    closingNote: textValue(
-      pickField(row, ['closingNote', 'closing']),
-      'We look forward to your favorable response and remain available for any clarifications.',
-    ),
+    closingNote: textValue(pickField(row, ['closingNote', 'closing'])),
     statusTracking: asStatusTracking(pickField(row, ['statusTracking'])),
     followUpDate: isoDate(pickField(row, ['followUpDate', 'followup']), ''),
     via: textValue(pickField(row, ['via']), 'Email'),
@@ -478,11 +736,11 @@ export function normalizeImportedQuotation(
     dept: textValue(pickField(row, ['dept', 'department'])),
     spDept: textValue(pickField(row, ['spDept'])),
     showRm: Boolean(pickField(row, ['showRm', 'showRates']) ?? false),
-    signatureOption: textValue(pickField(row, ['signatureOption'])).toLowerCase() === 'digital'
-      ? 'digital'
-      : textValue(pickField(row, ['signatureOption'])).toLowerCase() === 'handwritten'
-        ? 'handwritten'
-        : 'none',
+    signatureOption: signatureOption === 'digital' || signatureOption === 'handwritten'
+      ? signatureOption
+      : 'none',
+    pdfHeading: textValue(pickField(row, ['pdfHeading', 'heading']), defaultPdfHeading(type)),
+    signatureImage: textValue(pickField(row, ['signatureImage'])),
     sub: textValue(pickField(row, ['sub', 'subject'])),
     revised: Boolean(pickField(row, ['revised']) ?? false),
     rateNote: textValue(pickField(row, ['rateNote'])),

@@ -465,9 +465,14 @@ export const useStore = create<StoreState>()(
       setError: (error) => set({ error }),
 
       addToast: (toast) =>
-        set((state) => ({
-          toasts: [{ ...toast, id: generateId() }, ...state.toasts].slice(0, 3),
-        })),
+        set((state) => {
+          // Replace an existing notification of the same kind/title instead of
+          // stacking duplicates, and keep at most three visible at a time.
+          const remaining = state.toasts.filter(
+            (existing) => !(existing.type === toast.type && existing.title === toast.title),
+          )
+          return { toasts: [{ ...toast, id: generateId() }, ...remaining].slice(0, 3) }
+        }),
 
       removeToast: (id) =>
         set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),

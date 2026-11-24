@@ -6,6 +6,8 @@ import {
   Building, FileText, PenTool, Palette, Hash, Shield, Database, Download, Upload, RotateCcw, Trash2, Save, Eye, Globe, Moon, Sun, Bell, Key, User, Plus, X, Folder, Check,
 } from 'lucide-react'
 import { useStore } from '@/services/store'
+import { SignaturePad } from '@/components/SignaturePad'
+import { CollapsibleSection } from '@/components/CollapsibleSection'
 import {
   createBackup,
   listBackupFiles,
@@ -444,12 +446,18 @@ function SignatureSettingsForm({ settings, onChange }: { settings: any; onChange
             </label>
           </div>
         </div>
-        {settings.signatureImage && (
-          <div className="mt-4 p-4 glass-hover rounded-xl border border-border-subtle">
-            <p className="text-sm font-medium text-text-secondary mb-2">Preview</p>
-            <img src={settings.signatureImage} alt="Signature preview" className="max-h-32 rounded-lg" />
-          </div>
-        )}
+        <div className="md:col-span-2 mt-2">
+          <CollapsibleSection
+            title="Upload or draw a signature"
+            summary={settings.signatureImage ? 'Signature image saved' : 'PNG/JPG/SVG upload or draw on canvas'}
+          >
+            <SignaturePad
+              value={settings.signatureImage || ''}
+              onChange={(dataUrl) => update('signatureImage', dataUrl)}
+              label="Digital Signature"
+            />
+          </CollapsibleSection>
+        </div>
       </div>
     </div>
   )

@@ -39,6 +39,10 @@
   // Excel/PDF export options
   showRm: boolean
   signatureOption: 'none' | 'digital' | 'handwritten'
+  /** Main heading printed on exported PDF/Excel documents. */
+  pdfHeading?: string
+  /** Optional per-quotation signature image (base64 data URL). */
+  signatureImage?: string
   // V1 additional fields
   sub?: string          // Valve quote subject line
   revised?: boolean     // Add "REVISED" to title
@@ -80,6 +84,8 @@ export interface QuotationItem {
   classRating?: string
   remarks?: string
   sNo?: number
+  /** Serial number extracted from equipment lists (e.g. "S/N: 12345"). */
+  serialNo?: string
 }
 
 export interface AnnexurePage {

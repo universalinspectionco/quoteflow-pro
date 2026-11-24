@@ -34,6 +34,17 @@ import {
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { useStore } from "@/services/store"
+import { SignaturePad } from "@/components/SignaturePad"
+import { CollapsibleSection } from "@/components/CollapsibleSection"
+import { exportQuotationExcel, exportQuotationPdf } from "@/utils/quotationExport"
+import {
+  importedHeaderPreview,
+  mapFlexibleItem,
+  normalizeImportedQuotation,
+  readImportSources,
+} from "@/utils/quotationImport"
+import type { ImportGroup, ImportSource } from "@/utils/quotationImport"
+import { HEADING_HYDRO, HEADING_INSPECTION, defaultPdfHeading } from "@/utils/uicFormats"
 import { formatCurrency, formatDate, formatNumber, generateId } from "@/utils/formatters"
 import type {
   AnnexurePage,
@@ -132,6 +143,8 @@ type QuoteFormData = {
   spDept: string
   showRm: boolean
   signatureOption: Quotation["signatureOption"]
+  pdfHeading: string
+  signatureImage: string
   sub: string
   revised: boolean
   rateNote: string
@@ -151,6 +164,8 @@ const buildFormData = (
   quoteNumber: string
 ): QuoteFormData => ({
   type: quote?.type || "standard",
+  pdfHeading: quote?.pdfHeading || defaultPdfHeading(quote?.type || "standard"),
+  signatureImage: quote?.signatureImage || "",
   quoteNumber: quote?.quoteNumber || quoteNumber,
   date: quote?.date || todayISO(),
   client: makeClient(quote?.client),
@@ -267,10 +282,14 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
 
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [importType, setImportType] = useState<"quotation" | "lineItems">("quotation")
-  const [importFilePath, setImportFilePath] = useState<string | null>(null)
+  const [importSources, setImportSources] = useState<ImportSource[]>([])
+  const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
+  const [importGroups, setImportGroups] = useState<ImportGroup[]>([])
+  const [importWarnings, setImportWarnings] = useState<string[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [importProgress, setImportProgress] = useState(0)
   const [importStatus, setImportStatus] = useState<
-    "idle" | "importing" | "mapping" | "complete" | "error"
+    "idle" | "reading" | "importing" | "mapping" | "complete" | "error"
   >("idle")
   const [importedData, setImportedData] = useState<{ headers: string[] } | null>(null)
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({})
@@ -395,62 +414,25 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
     addToast({ type: "success", title: "Duplicated", message: "Quotation duplicated successfully" })
   }
 
+  const exportableQuote = (): Quotation => {
+    const now = new Date().toISOString()
+    return {
+      ...formData,
+      id: quote?.id || generateId(),
+      status: quote?.status || "draft",
+      subtotal: totals.subtotal,
+      tax: totals.tax,
+      total: totals.total,
+      createdAt: quote?.createdAt || now,
+      updatedAt: now,
+    } as Quotation
+  }
+
   const handleExportPDF = async () => {
     if (!validate()) return
-    addToast({ type: "info", title: "Exporting PDF", message: "Generating PDF..." })
-
+    addToast({ type: "info", title: "Exporting PDF", message: "Generating UIC PDF..." })
     try {
-      const { jsPDF } = await import("jspdf")
-      const autoTableModule = await import("jspdf-autotable")
-      // Vite's CJS interop can expose the function at `.default.default`.
-      const autoTable = (
-        (autoTableModule.default as unknown as { default?: typeof autoTableModule.default })?.default ||
-        autoTableModule.default ||
-        (autoTableModule as unknown as { applyPlugin: typeof autoTableModule.default }).applyPlugin
-      )
-      const doc = new jsPDF()
-
-      doc.setFontSize(18)
-      doc.setTextColor(99, 102, 241)
-      doc.text(settings.company.name || "Universal Inspection Co. Ltd.", 14, 20)
-      doc.setFontSize(10)
-      doc.setTextColor(90, 90, 90)
-      doc.text(`VAT Number: ${settings.company.vatNumber || formData.client.vatNumber || ""}`, 14, 28)
-      doc.text(`Quote: ${formData.quoteNumber}`, 14, 34)
-      doc.text(`Date: ${formatDate(formData.date)}`, 14, 40)
-      doc.text(`Client: ${formData.client.name}`, 14, 46)
-      if (formData.poNumber) doc.text(`PO Number: ${formData.poNumber}`, 14, 52)
-      if (formData.ref) doc.text(`Reference: ${formData.ref}`, 14, 58)
-
-      const rows = formData.items.map((item, index) => [
-        index + 1,
-        item.description || "",
-        item.sizeInch || "",
-        item.classRating || "",
-        item.quantity,
-        item.unit,
-        item.rate,
-        item.amount,
-        item.remarks || "",
-      ])
-
-      autoTable(doc, {
-        head: [["#", "Description", "Size (Inch)", "Class Rating", "Qty", "Unit", "Rate (SAR)", "Amount (SAR)", "Remarks"]],
-        body: rows,
-        startY: 66,
-        theme: "grid",
-        headStyles: { fillColor: [99, 102, 241], textColor: 255 },
-        bodyStyles: { fontSize: 8 },
-        margin: { left: 10, right: 10 },
-      })
-
-      const finalY = (doc as any).lastAutoTable?.finalY ?? 90
-      doc.setFontSize(10)
-      doc.text(`Subtotal: ${formatCurrency(totals.subtotal, CURRENCY)}`, 140, finalY + 10)
-      doc.text(`VAT (${VAT_RATE}%): ${formatCurrency(totals.tax, CURRENCY)}`, 140, finalY + 16)
-      doc.text(`Net Total: ${formatCurrency(totals.total, CURRENCY)}`, 140, finalY + 22)
-
-      doc.save(`Quotation_${formData.quoteNumber}.pdf`)
+      await exportQuotationPdf(exportableQuote(), settings)
       addToast({ type: "success", title: "Exported", message: "PDF generated successfully" })
     } catch (err) {
       console.error("PDF export error:", err)
@@ -460,27 +442,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
 
   const handleExportExcel = async () => {
     if (!validate()) return
-    addToast({ type: "info", title: "Exporting Excel", message: "Generating Excel..." })
-
+    addToast({ type: "info", title: "Exporting Excel", message: "Generating UIC Excel..." })
     try {
-      const XLSX = await import("xlsx")
-      const rows = formData.items.map((item, index) => ({
-        "#": index + 1,
-        Description: item.description || "",
-        "Size (Inch)": item.sizeInch || "",
-        "Class Rating": item.classRating || "",
-        Quantity: item.quantity,
-        Unit: item.unit,
-        "Rate (SAR)": item.rate,
-        "Amount (SAR)": item.amount,
-        Remarks: item.remarks || "",
-      }))
-
-      const worksheet = XLSX.utils.json_to_sheet(rows)
-      const workbook = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(workbook, worksheet, "Quotation")
-      XLSX.writeFile(workbook, `Quotation_${formData.quoteNumber}.xlsx`)
-
+      await exportQuotationExcel(exportableQuote(), settings)
       addToast({ type: "success", title: "Exported", message: "Excel generated successfully" })
     } catch (err) {
       console.error("Excel export error:", err)
@@ -488,107 +452,116 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
     }
   }
 
-  const parseFilePreview = async (filePath: string) => {
-    try {
-      const { readFile } = window.electronAPI || {}
-      if (!readFile) throw new Error("File reading not available")
-      const content = await readFile(filePath)
-      if (!content) throw new Error("Could not read file")
-
-      if (filePath.endsWith(".json")) {
-        const data = JSON.parse(content)
-        if (Array.isArray(data)) return { headers: Object.keys(data[0] || {}) }
-        return { headers: Object.keys(data) }
-      }
-      if (filePath.endsWith(".csv")) {
-        const lines = content.split(/\r?\n/).filter((line) => line.trim())
-        const headers = (lines[0] || "").split(",").map((h) => h.trim().replace(/^"|"$/g, ""))
-        return { headers }
-      }
-      return { headers: [] }
-    } catch (err) {
-      console.error("File preview error:", err)
-      return { headers: [] }
+  const loadImportSources = async (sources: ImportSource[]) => {
+    if (sources.length === 0) return
+    setImportSources(sources)
+    setImportRows([])
+    setImportGroups([])
+    setImportWarnings([])
+    setImportProgress(0)
+    setImportStatus("reading")
+    const result = await readImportSources(sources)
+    if (result.rows.length === 0) {
+      setImportWarnings(result.errors)
+      setImportStatus("error")
+      return
     }
+    setImportRows(result.rows)
+    setImportGroups(result.groups)
+    setImportWarnings(result.errors)
+    setImportedData({ headers: importedHeaderPreview(result.rows) })
+    setColumnMapping({})
+    setImportStatus("idle")
   }
 
-  const readImportRows = async (filePath: string): Promise<Record<string, unknown>[]> => {
-    const { readFile } = window.electronAPI || {}
-    if (!readFile) throw new Error("File reading not available")
-    const content = await readFile(filePath)
-    if (!content) throw new Error("Could not read file")
+  const handleElectronImportFile = async () => {
+    const result = await window.electronAPI?.showOpenDialog({
+      title: "Import Quotation Files",
+      filters: [
+        { name: "All Supported", extensions: ["json", "xlsx", "xls", "csv", "pdf"] },
+        { name: "Excel", extensions: ["xlsx", "xls"] },
+        { name: "CSV", extensions: ["csv"] },
+        { name: "PDF", extensions: ["pdf"] },
+        { name: "JSON", extensions: ["json"] },
+      ],
+      properties: ["openFile", "multiSelections"],
+    })
+    if (result?.canceled || !result?.filePaths?.length) return
+    await loadImportSources(
+      result.filePaths.map((filePath) => ({
+        kind: "path" as const,
+        path: String(filePath),
+        name: String(filePath).split(/[\\/]/).pop() || String(filePath),
+      })),
+    )
+  }
 
-    if (filePath.endsWith(".json")) {
-      const data = JSON.parse(content)
-      return Array.isArray(data) ? data : [data]
+  const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
+    if (files.length > 0) {
+      void loadImportSources(files.map((file) => ({ kind: "file" as const, file, name: file.name })))
     }
-    if (filePath.endsWith(".csv")) {
-      const lines = content.split(/\r?\n/).filter((line) => line.trim())
-      if (lines.length === 0) return []
-      const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""))
-      return lines.slice(1).map((line) => {
-        const values = line.split(",").map((v) => v.trim().replace(/^"|"$/g, ""))
-        const row: Record<string, unknown> = {}
-        headers.forEach((header, index) => {
-          row[header] = values[index] ?? ""
-        })
-        return row
+    event.target.value = ""
+  }
+
+  const importedItems = (): QuotationItem[] => {
+    const result: QuotationItem[] = []
+    importRows.forEach((row) => {
+      const nested = Array.isArray(row.items) ? row.items : [row]
+      nested.forEach((entry) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return
+        const item = mapFlexibleItem(entry as Record<string, unknown>, result.length)
+        if (item) result.push(normalizeItem(item))
       })
-    }
-    throw new Error("Unsupported file type. Please use JSON or CSV.")
+    })
+    return result
   }
 
   const importFileHandler = async () => {
-    if (!importFilePath) return
-
+    if (importRows.length === 0) return
     try {
-      setImportProgress(10)
-      const data = await readImportRows(importFilePath)
+      setImportStatus("importing")
+      setImportProgress(20)
+      const items = importedItems()
+      if (items.length === 0) throw new Error("No line items were found in the selected files")
       setImportProgress(60)
 
+      const inferredName = importGroups[0]?.clientName
       if (importType === "quotation") {
-        const quoteData = (data[0] || {}) as Record<string, any>
-        const rawItems = Array.isArray(quoteData.items) ? quoteData.items : []
-        const clientSource =
-          (quoteData.client as Partial<Client> | undefined) ||
-          ({
-            name: quoteData["client.name"] || quoteData.clientName || "",
-            company: quoteData["client.company"] || quoteData.clientCompany || "",
-            email: quoteData["client.email"] || quoteData.clientEmail || "",
-            phone: quoteData["client.phone"] || quoteData.clientPhone || "",
-            address: quoteData["client.address"] || quoteData.clientAddress || "",
-            vatNumber: quoteData["client.vatNumber"] || quoteData.clientVatNumber || "",
-            contactPerson: quoteData["client.contactPerson"] || quoteData.clientContactPerson || "",
-          } as Partial<Client>)
-
+        const head = normalizeImportedQuotation(importRows[0], { settings, clientName: inferredName })
         setFormData((prev) => ({
           ...prev,
-          quoteNumber: quoteData.quoteNumber || prev.quoteNumber,
-          date: quoteData.date || prev.date,
-          client: { ...prev.client, ...makeClient(clientSource) },
-          notes: quoteData.notes || prev.notes,
-          terms: quoteData.terms || prev.terms,
-          ref: quoteData.ref || prev.ref,
-          poNumber: quoteData.poNumber || prev.poNumber,
-          items: rawItems.length
-            ? rawItems.map((item: Partial<QuotationItem>) => normalizeItem(item))
-            : [createEmptyItem()],
+          quoteNumber: head?.quoteNumber || prev.quoteNumber,
+          date: head?.date || prev.date,
+          client: head?.client
+            ? {
+                ...prev.client,
+                ...head.client,
+                name: prev.client.name && prev.client.name !== "Imported Client" ? prev.client.name : head.client.name,
+              }
+            : prev.client,
+          notes: head?.notes || prev.notes,
+          terms: head?.terms || prev.terms,
+          ref: head?.ref || prev.ref,
+          poNumber: head?.poNumber || prev.poNumber,
+          attnTo: head?.attnTo || prev.attnTo,
+          location: head?.location || prev.location,
+          project: head?.project || prev.project,
+          pdfHeading: head?.pdfHeading || prev.pdfHeading,
+          signatureImage: head?.signatureImage || prev.signatureImage,
+          items,
         }))
-        addToast({ type: "success", title: "Imported", message: "Quotation imported successfully" })
+        addToast({ type: "success", title: "Imported", message: "Quotation loaded and ready to edit" })
       } else {
-        const newItems = data.map((item) =>
-          normalizeItem({
-            description: String(item.description ?? ""),
-            quantity: Number(item.quantity) || 1,
-            unit: String(item.unit ?? "PCS"),
-            rate: Number(item.rate) || 0,
-            sizeInch: String(item.sizeInch ?? item["size (inch)"] ?? ""),
-            classRating: String(item.classRating ?? item["class rating"] ?? ""),
-            remarks: String(item.remarks ?? ""),
-          })
-        )
-        setFormData((prev) => ({ ...prev, items: [...prev.items, ...newItems] }))
-        addToast({ type: "success", title: "Imported", message: `${newItems.length} line items imported` })
+        setFormData((prev) => ({
+          ...prev,
+          client:
+            !prev.client.name || prev.client.name === "Imported Client"
+              ? { ...prev.client, name: inferredName || prev.client.name, company: inferredName || prev.client.company }
+              : prev.client,
+          items: [...prev.items, ...items],
+        }))
+        addToast({ type: "success", title: "Imported", message: `${items.length} line items imported` })
       }
 
       setImportProgress(100)
@@ -599,21 +572,17 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
       addToast({
         type: "error",
         title: "Import Failed",
-        message: err instanceof Error ? err.message : "Could not import file. Please check format.",
+        message: err instanceof Error ? err.message : "Could not import files. Please check format.",
       })
     }
   }
 
   const applyColumnMapping = async () => {
-    if (!importFilePath) return
-
+    if (importRows.length === 0) return
     try {
       setImportStatus("importing")
       setImportProgress(10)
-      const data = await readImportRows(importFilePath)
-      setImportProgress(60)
-
-      const mapped = data.map((row) => {
+      const mapped = importRows.map((row) => {
         const item: Partial<QuotationItem> = {}
         Object.entries(columnMapping).forEach(([header, target]) => {
           if (!target) return
@@ -625,10 +594,10 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
           if (target === "sizeInch") item.sizeInch = String(value ?? "")
           if (target === "classRating") item.classRating = String(value ?? "")
           if (target === "remarks") item.remarks = String(value ?? "")
+          if (target === "serialNo") item.serialNo = String(value ?? "")
         })
         return normalizeItem(item)
       })
-
       setFormData((prev) => ({ ...prev, items: [...prev.items, ...mapped] }))
       setImportProgress(100)
       setImportStatus("complete")
@@ -695,28 +664,12 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              onClick={() => {
-                setImportType("quotation")
-                setShowImportDialog(true)
-              }}
+              onClick={() => setShowImportDialog(true)}
               className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2 text-text-secondary hover:text-text-primary"
-              title="Import Quotation"
+              title="Import a quotation or line items"
             >
               <Upload className="w-4 h-4" />
-              Import Quote
-            </motion.button>
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={() => {
-                setImportType("lineItems")
-                setShowImportDialog(true)
-              }}
-              className="glass-hover px-4 py-2 rounded-xl font-medium flex items-center gap-2 text-text-secondary hover:text-text-primary"
-              title="Import Line Items"
-            >
-              <FileInput className="w-4 h-4" />
-              Import Items
+              Import
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -862,12 +815,17 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                     </label>
                     <select
                       value={formData.type}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const nextType = e.target.value as "standard" | "valve"
                         setFormData((prev) => ({
                           ...prev,
-                          type: e.target.value as "standard" | "valve",
+                          type: nextType,
+                          pdfHeading:
+                            prev.pdfHeading === HEADING_HYDRO || prev.pdfHeading === HEADING_INSPECTION || !prev.pdfHeading
+                              ? defaultPdfHeading(nextType)
+                              : prev.pdfHeading,
                         }))
-                      }
+                      }}
                       className="glass-hover px-3 py-2.5 rounded-xl text-sm focus-ring border border-border-subtle bg-bg-secondary"
                     >
                       <option value="standard">Standard</option>
@@ -960,6 +918,44 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   </div>
                 </div>
               </motion.section>
+
+              {/* PDF Heading */}
+              <CollapsibleSection
+                title="PDF Heading"
+                icon={<FileText className="w-4 h-4" />}
+                summary={formData.pdfHeading || "Heading used on exported documents"}
+              >
+                <div className="flex items-center gap-2 flex-wrap mb-3">
+                    <button
+                      type="button"
+                      onClick={() => setFormData((prev) => ({ ...prev, pdfHeading: HEADING_INSPECTION }))}
+                      className={`glass-hover px-3 py-1.5 rounded-lg text-xs font-medium ${
+                        formData.pdfHeading === HEADING_INSPECTION ? 'text-primary border border-primary/40' : 'text-text-secondary'
+                      }`}
+                    >
+                      Inspection Services
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData((prev) => ({ ...prev, pdfHeading: HEADING_HYDRO }))}
+                      className={`glass-hover px-3 py-1.5 rounded-lg text-xs font-medium ${
+                        formData.pdfHeading === HEADING_HYDRO ? 'text-primary border border-primary/40' : 'text-text-secondary'
+                      }`}
+                    >
+                      Hydro Test Services
+                    </button>
+                  </div>
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={formData.pdfHeading}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, pdfHeading: e.target.value }))}
+                    className="w-full glass-hover px-3 py-2.5 rounded-xl text-sm focus-ring border border-border-subtle bg-bg-secondary font-semibold"
+                    placeholder="QUOTATION FOR THE HYDRO TEST SERVICES"
+                    aria-label="PDF Heading"
+                  />
+                </div>
+              </CollapsibleSection>
 
               {/* Line Items */}
               <motion.section
@@ -1154,19 +1150,12 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
               </motion.section>
 
               {/* Notes & Terms */}
-              <motion.section
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="glass-elevated rounded-2xl border border-border-subtle overflow-hidden"
+              <CollapsibleSection
+                title="Notes & Terms"
+                icon={<FileText className="w-4 h-4" />}
+                summary="Client notes and payment terms"
               >
-                <div className="p-5 border-b border-border-subtle">
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <FileText className="w-5 h-5" />
-                    Notes & Terms
-                  </h2>
-                </div>
-                <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium text-text-secondary">Notes</label>
                     <textarea
@@ -1188,22 +1177,15 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                     />
                   </div>
                 </div>
-              </motion.section>
+              </CollapsibleSection>
 
               {/* Signature & Options */}
-              <motion.section
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.22 }}
-                className="glass-elevated rounded-2xl border border-border-subtle overflow-hidden"
+              <CollapsibleSection
+                title="Signature & Options"
+                icon={<PenLine className="w-4 h-4" />}
+                summary={`${formData.signatureOption === "none" ? "No signature" : formData.signatureOption} · ${settings.signature.name}`}
               >
-                <div className="p-5 border-b border-border-subtle">
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <PenLine className="w-5 h-5" />
-                    Signature & Options
-                  </h2>
-                </div>
-                <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium text-text-secondary">Signature Option</label>
                     <select
@@ -1237,24 +1219,28 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                       {settings.signature.name} — {settings.signature.designation}
                     </p>
                   </div>
+                  <div className="lg:col-span-2">
+                    <SignaturePad
+                      value={formData.signatureImage}
+                      onChange={(dataUrl) => setFormData((prev) => ({ ...prev, signatureImage: dataUrl }))}
+                      label="Quotation Signature"
+                    />
+                    <p className="text-xs text-text-muted mt-2">
+                      Leave empty to use the signature saved in Settings. Uploaded images are stored as base64 on this quotation.
+                    </p>
+                  </div>
                 </div>
-              </motion.section>
+              </CollapsibleSection>
 
               {/* Annexure Pages */}
-              <motion.section
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.25 }}
-                className="glass-elevated rounded-2xl border border-border-subtle overflow-hidden"
+              <CollapsibleSection
+                title="Annexure Pages"
+                icon={<FilePlus className="w-4 h-4" />}
+                summary={`${formData.annexurePages.length} page${formData.annexurePages.length === 1 ? '' : 's'} attached`}
               >
-                <div className="p-5 border-b border-border-subtle flex items-center justify-between">
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <FilePlus className="w-5 h-5" />
-                    Annexure Pages
-                  </h2>
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
+                <div className="flex justify-end mb-3">
+                  <button
+                    type="button"
                     onClick={() =>
                       setFormData((prev) => ({
                         ...prev,
@@ -1268,9 +1254,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   >
                     <Plus className="w-4 h-4" />
                     Add Page
-                  </motion.button>
+                  </button>
                 </div>
-                <div className="p-5 space-y-4">
+                <div className="space-y-4">
                   {formData.annexurePages.length === 0 ? (
                     <div className="text-center py-8">
                       <FileText className="w-12 h-12 mx-auto text-text-muted/50 mb-4" />
@@ -1358,7 +1344,7 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                     ))
                   )}
                 </div>
-              </motion.section>
+              </CollapsibleSection>
             </motion.div>
 
             {/* Right Panel - Totals */}
@@ -1441,62 +1427,21 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   </div>
                 </motion.section>
 
-                {/* Quick Actions */}
-                <motion.section
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.05 }}
-                  className="glass-elevated rounded-2xl border border-border-subtle overflow-hidden"
-                >
-                  <div className="p-5 border-b border-border-subtle">
-                    <h2 className="text-lg font-semibold">Quick Actions</h2>
-                  </div>
-                  <div className="p-5 space-y-3">
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={handleSave}
-                      className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 bg-primary text-white hover:bg-primary-hover shadow-glow"
-                    >
-                      <Save className="w-5 h-5" />
-                      Save Quotation
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={handleExportPDF}
-                      className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 text-text-secondary hover:text-primary"
-                    >
-                      <FileText className="w-5 h-5" />
-                      Export PDF
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={handleExportExcel}
-                      className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 text-text-secondary hover:text-secondary"
-                    >
-                      <Download className="w-5 h-5" />
-                      Export Excel
-                    </motion.button>
-                    {isEditing && (
-                      <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        onClick={handleDuplicate}
-                        className="w-full glass-hover px-4 py-3 rounded-xl font-medium flex items-center justify-center gap-2 text-text-secondary hover:text-secondary"
-                      >
-                        <Copy className="w-5 h-5" />
-                        Duplicate
-                      </motion.button>
-                    )}
-                  </div>
-                </motion.section>
               </div>
             </motion.div>
           </div>
         </div>
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,.csv,.txt,.xlsx,.xls,.pdf"
+        multiple
+        onChange={handleFileInput}
+        className="hidden"
+        aria-label="Choose quotation import files"
+      />
 
       {/* Import Dialog */}
       <AnimatePresence>
@@ -1528,7 +1473,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   whileTap={{ scale: 0.9 }}
                   onClick={() => {
                     setShowImportDialog(false)
-                    setImportFilePath(null)
+                    setImportSources([])
+                    setImportRows([])
+                    setImportWarnings([])
                     setImportedData(null)
                     setColumnMapping({})
                     setImportProgress(0)
@@ -1539,33 +1486,56 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   <X className="w-5 h-5" />
                 </motion.button>
               </div>
+              <div className="px-6 pt-4 flex gap-2">
+                {(["quotation", "lineItems"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setImportType(mode)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border ${
+                      importType === mode
+                        ? "border-primary/40 text-primary bg-primary/10"
+                        : "border-border-subtle text-text-muted hover:text-text-primary"
+                    }`}
+                  >
+                    {mode === "quotation" ? "Import as quotation" : "Add line items"}
+                  </button>
+                ))}
+              </div>
 
-              <div className="p-6 overflow-y-auto flex-1">
-                {!importFilePath ? (
+              <div className="p-6 pt-4 overflow-y-auto flex-1">
+                {importStatus === "reading" ? (
+                  <div className="text-center py-12">
+                    <Loader2 className="w-10 h-10 mx-auto text-primary animate-spin mb-4" />
+                    <p className="font-medium text-text-primary">Reading files...</p>
+                    <p className="text-sm text-text-muted mt-1">
+                      {importSources.map((source) => source.name).join(", ")}
+                    </p>
+                  </div>
+                ) : importSources.length === 0 ? (
                   <div className="space-y-6">
                     <div>
-                      <h4 className="font-medium text-text-primary mb-3">Select Import File</h4>
+                      <h4 className="font-medium text-text-primary mb-3">Select Import Files</h4>
                       <div
                         className="glass-hover border-2 border-dashed border-border-subtle rounded-xl p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
-                        onClick={async () => {
-                          if (typeof window !== "undefined" && window.electronAPI) {
-                            const result = await window.electronAPI.showOpenDialog({
-                              filters: [
-                                { name: "All Supported", extensions: ["json", "csv"] },
-                                { name: "JSON", extensions: ["json"] },
-                                { name: "CSV", extensions: ["csv"] },
-                              ],
-                              properties: ["openFile"],
-                            })
-                            if (!result.canceled && result.filePaths.length > 0) {
-                              setImportFilePath(result.filePaths[0])
-                            }
+                        onClick={() => {
+                          if (window.electronAPI?.showOpenDialog) void handleElectronImportFile()
+                          else fileInputRef.current?.click()
+                        }}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          const files = Array.from(e.dataTransfer.files || [])
+                          if (files.length > 0) {
+                            void loadImportSources(files.map((file) => ({ kind: "file" as const, file, name: file.name })))
                           }
                         }}
                       >
                         <Upload className="w-12 h-12 mx-auto text-text-muted mb-4" />
-                        <p className="text-text-secondary mb-2">Click to select file</p>
-                        <p className="text-xs text-text-muted">Supports: JSON, CSV</p>
+                        <p className="text-text-secondary mb-2">Select multiple files or drop them here</p>
+                        <p className="text-xs text-text-muted">
+                          Supports JSON, CSV, Excel (.xlsx/.xls) and PDF · headers auto-detected on any row
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -1575,17 +1545,25 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                       <div className="flex items-center gap-3">
                         <FileText className="w-8 h-8 text-primary" />
                         <div>
-                          <p className="font-medium text-text-primary">{importFilePath}</p>
-                          <p className="text-xs text-text-muted">
-                            {importType === "quotation" ? "Quotation File" : "Line Items File"}
+                          <p className="font-medium text-text-primary">
+                            {importSources.map((source) => source.name).join(", ")}
                           </p>
+                          <p className="text-xs text-text-muted">
+                            {importRows.length} row(s) · {importType === "quotation" ? "Quotation" : "Line Items"} ·{' '}
+                            {importedData?.headers?.slice(0, 8).join(", ") || "no columns"}
+                          </p>
+                          {importWarnings.length > 0 && (
+                            <p className="text-xs text-warning mt-1">{importWarnings.join(" · ")}</p>
+                          )}
                         </div>
                       </div>
                       <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         onClick={() => {
-                          setImportFilePath(null)
+                          setImportSources([])
+                          setImportRows([])
+                          setImportWarnings([])
                           setImportedData(null)
                           setColumnMapping({})
                           setImportProgress(0)
@@ -1617,10 +1595,7 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                         <motion.button
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
-                          onClick={async () => {
-                            setImportStatus("mapping")
-                            if (importFilePath) setImportedData(await parseFilePreview(importFilePath))
-                          }}
+                          onClick={() => setImportStatus("mapping")}
                           className="glass-hover p-4 rounded-xl border-2 border-border-subtle hover:border-secondary/50 transition-colors"
                         >
                           <FileInput className="w-6 h-6 mx-auto text-secondary mb-2" />
@@ -1670,6 +1645,7 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                             <option value="sizeInch">Size (Inch)</option>
                             <option value="classRating">Class Rating</option>
                             <option value="remarks">Remarks</option>
+                            <option value="serialNo">Serial No</option>
                           </select>
                         </div>
                       ))}
@@ -1706,7 +1682,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                       whileTap={{ scale: 0.98 }}
                       onClick={() => {
                         setShowImportDialog(false)
-                        setImportFilePath(null)
+                        setImportSources([])
+                        setImportRows([])
+                        setImportWarnings([])
                         setImportedData(null)
                         setColumnMapping({})
                         setImportProgress(0)
@@ -1721,7 +1699,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                   <div className="space-y-4 text-center">
                     <AlertCircle className="w-16 h-16 mx-auto text-error" />
                     <p className="font-medium text-text-primary">Import Failed</p>
-                    <p className="text-sm text-text-muted">An error occurred during import</p>
+                    <p className="text-sm text-text-muted">
+                      {importWarnings.join(" · ") || "An error occurred during import"}
+                    </p>
                     <motion.button
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
