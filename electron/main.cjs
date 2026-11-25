@@ -1,7 +1,87 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, screen } = require('electron')
-const { join, resolve } = require('path')
+const { join, resolve, normalize, sep } = require('path')
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('fs')
 const { autoUpdater } = require('electron-updater')
+
+// Security: Define allowed base directories for file operations
+const ALLOWED_BASE_DIRS = [
+  app.getPath('userData'),
+  app.getPath('documents'),
+  app.getPath('downloads'),
+  app.getPath('desktop'),
+  app.getAppPath(),
+].filter(Boolean)
+
+// Security: Helper to validate path is within allowed directories
+function isPathAllowed(targetPath) {
+  try {
+    const normalized = normalize(targetPath)
+    const resolved = resolve(normalized)
+    // Check if path is within any allowed base directory
+    return ALLOWED_BASE_DIRS.some(base => {
+      const baseResolved = resolve(normalize(base))
+      return resolved.startsWith(baseResolved + sep) || resolved === baseResolved
+    })
+  } catch {
+    return false
+  }
+}
+
+// Security: Validate dialog options
+function validateDialogOptions(options) {
+  if (!options || typeof options !== 'object') return {}
+
+  const safeOptions = {}
+
+  // Only allow specific properties
+  const allowedProps = ['title', 'defaultPath', 'buttonLabel', 'filters', 'properties', 'message', 'detail', 'type', 'buttons', 'defaultId', 'cancelId', 'checkboxLabel', 'checkboxChecked']
+  for (const prop of allowedProps) {
+    if (options[prop] !== undefined) {
+      safeOptions[prop] = options[prop]
+    }
+  }
+
+  // Validate properties array
+  if (safeOptions.properties) {
+    const allowedProperties = ['openFile', 'openDirectory', 'multiSelections', 'createDirectory', 'promptToCreate', 'showHiddenFiles', 'treatPackageAsDirectory']
+    safeOptions.properties = safeOptions.properties.filter(p => allowedProperties.includes(p))
+  }
+
+  // Validate filters if present
+  if (safeOptions.filters && Array.isArray(safeOptions.filters)) {
+    const allowedExtensions = ['json', 'csv', 'xlsx', 'xls', 'pdf', 'txt', 'png', 'jpg', 'jpeg', 'svg']
+    safeOptions.filters = safeOptions.filters.map(f => ({
+      name: f.name,
+      extensions: (f.extensions || []).filter(ext => allowedExtensions.includes(ext.toLowerCase()))
+    })).filter(f => f.extensions.length > 0)
+  }
+
+  // Restrict defaultPath to safe directories
+  if (safeOptions.defaultPath && typeof safeOptions.defaultPath === 'string') {
+    const resolved = resolve(safeOptions.defaultPath)
+    if (!ALLOWED_BASE_DIRS.some(base => resolved.startsWith(resolve(base) + sep))) {
+      delete safeOptions.defaultPath
+    }
+  }
+
+  return safeOptions
+}
+
+// Security: Validate URL for shell:openExternal
+function isValidExternalUrl(url) {
+  if (!url || typeof url !== 'string') return false
+  try {
+    const parsed = new URL(url)
+    // Only allow http/https protocols
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false
+    // Optional: Add domain allowlist here if needed
+    // const allowedDomains = ['github.com', 'universalinspection.sa']
+    // return allowedDomains.some(d => parsed.hostname.endsWith(d))
+    return true
+  } catch {
+    return false
+  }
+}
 
 const isDev = !app.isPackaged
 const preload = join(__dirname, 'preload.cjs')
@@ -194,32 +274,45 @@ ipcMain.handle('app:maximize', () => {
 ipcMain.handle('app:isMaximized', () => mainWindow?.isMaximized())
 ipcMain.handle('app:close', () => mainWindow?.close())
 ipcMain.handle('dialog:showOpen', async (_, options) => {
-  const result = await dialog.showOpenDialog(mainWindow, options)
+  const safeOptions = validateDialogOptions(options)
+  const result = await dialog.showOpenDialog(mainWindow, safeOptions)
   return result
 })
 ipcMain.handle('dialog:showOpenFolder', async (_, options = {}) => {
+  const safeOptions = validateDialogOptions(options)
+  safeOptions.properties = ['openDirectory', 'createDirectory']
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose a folder',
-    ...options,
-    properties: ['openDirectory', 'createDirectory'],
+    ...safeOptions,
   })
   return result
 })
 ipcMain.handle('dialog:showSave', async (_, options) => {
-  const result = await dialog.showSaveDialog(mainWindow, options)
+  const safeOptions = validateDialogOptions(options)
+  const result = await dialog.showSaveDialog(mainWindow, safeOptions)
   return result
 })
 ipcMain.handle('dialog:showMessage', async (_, options) => {
-  const result = await dialog.showMessageBox(mainWindow, options)
+  const safeOptions = validateDialogOptions(options)
+  const result = await dialog.showMessageBox(mainWindow, safeOptions)
   return result
 })
 ipcMain.handle('shell:openExternal', async (_, url) => {
+  if (!isValidExternalUrl(url)) {
+    throw new Error('Invalid or disallowed URL')
+  }
   await shell.openExternal(url)
 })
 ipcMain.handle('shell:openPath', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    throw new Error('Path not allowed')
+  }
   await shell.openPath(path)
 })
 ipcMain.handle('fs:readFile', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    throw new Error('Path not allowed')
+  }
   try {
     return readFileSync(path, 'utf8')
   } catch {
@@ -227,6 +320,9 @@ ipcMain.handle('fs:readFile', async (_, path) => {
   }
 })
 ipcMain.handle('fs:readFileBase64', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    throw new Error('Path not allowed')
+  }
   try {
     return readFileSync(path).toString('base64')
   } catch {
@@ -234,6 +330,9 @@ ipcMain.handle('fs:readFileBase64', async (_, path) => {
   }
 })
 ipcMain.handle('fs:writeFile', async (_, path, content) => {
+  if (!isPathAllowed(path)) {
+    throw new Error('Path not allowed')
+  }
   try {
     const dir = join(path, '..')
     if (!existsSync(dir)) {
@@ -246,9 +345,15 @@ ipcMain.handle('fs:writeFile', async (_, path, content) => {
   }
 })
 ipcMain.handle('fs:exists', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    return false
+  }
   return existsSync(path)
 })
 ipcMain.handle('fs:mkdir', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    throw new Error('Path not allowed')
+  }
   try {
     mkdirSync(path, { recursive: true })
     return true
@@ -257,6 +362,9 @@ ipcMain.handle('fs:mkdir', async (_, path) => {
   }
 })
 ipcMain.handle('fs:listDir', async (_, path) => {
+  if (!isPathAllowed(path)) {
+    return []
+  }
   try {
     const files = require('fs').readdirSync(path, { withFileTypes: true })
     return files.map(d => ({
