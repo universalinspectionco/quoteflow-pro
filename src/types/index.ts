@@ -173,7 +173,7 @@ export interface BrandingSettings {
   primaryColor: string
   secondaryColor: string
   fontFamily: string
-  theme: 'light' | 'dark' | 'system' | 'glass' | 'arctic' | 'snapchat' | 'midnight' | 'executive'
+  theme: 'neumorphism' | 'maximalism' | 'minimalism'
   accentColor: string
   borderRadius: 'sm' | 'md' | 'lg' | 'xl' | 'full'
   animationsEnabled: boolean

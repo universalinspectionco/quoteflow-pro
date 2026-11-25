@@ -1,7 +1,7 @@
 "use client"
 
 import { motion, AnimatePresence } from "motion/react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import {
   Save,
   Trash2,
@@ -256,6 +256,9 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
     addToast,
     nextQuoteNumber,
     setSelectedQuote,
+    companies,
+    addCompany,
+    setActiveCompany,
   } = useStore()
 
   const quote = selectedQuoteId
@@ -295,6 +298,8 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({})
 
   const totals = useMemo(() => computeTotals(formData.items), [formData.items])
+  const isValve = formData.type === "valve"
+  const [showSerials, setShowSerials] = useState(false)
 
   const addItem = () => {
     setFormData((prev) => ({ ...prev, items: [...prev.items, createEmptyItem()] }))
@@ -526,9 +531,21 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
       if (items.length === 0) throw new Error("No line items were found in the selected files")
       setImportProgress(60)
 
-      const inferredName = importGroups[0]?.clientName
+      // Helper to create/select company
+      const getOrCreateCompany = (companyName: string): string => {
+        const slug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+        const companyId = `company-${slug || 'imported'}`
+        if (!companies.some((company) => company.name.toLowerCase() === companyName.toLowerCase())) {
+          addCompany({ id: companyId, name: companyName, currency: 'SAR', taxRate: 15 })
+        }
+        return companyId
+      }
+
+      const inferredName = importGroups[0]?.clientName || 'Imported Client'
+      const companyId = getOrCreateCompany(inferredName)
       if (importType === "quotation") {
         const head = normalizeImportedQuotation(importRows[0], { settings, clientName: inferredName })
+        setActiveCompany(companyId)
         setFormData((prev) => ({
           ...prev,
           quoteNumber: head?.quoteNumber || prev.quoteNumber,
@@ -557,7 +574,7 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
           ...prev,
           client:
             !prev.client.name || prev.client.name === "Imported Client"
-              ? { ...prev.client, name: inferredName || prev.client.name, company: inferredName || prev.client.company }
+              ? { ...prev.client, name: inferredName, company: inferredName }
               : prev.client,
           items: [...prev.items, ...items],
         }))
@@ -964,35 +981,63 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                 transition={{ delay: 0.15 }}
                 className="glass-elevated rounded-2xl border border-border-subtle overflow-hidden"
               >
-                <div className="p-5 border-b border-border-subtle flex items-center justify-between">
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <FilePlus className="w-5 h-5" />
-                    Line Items
-                  </h2>
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={addItem}
-                    className="glass-hover px-3 py-1.5 rounded-xl text-sm font-medium flex items-center gap-1.5"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Add Item
-                  </motion.button>
+                <div className="p-5 border-b border-border-subtle flex items-center justify-between gap-3 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-lg font-semibold flex items-center gap-2">
+                      <FilePlus className="w-5 h-5" />
+                      Line Items
+                    </h2>
+                    <span className="text-xs text-text-muted">
+                      {isValve ? "Valve / Hydro Test format" : "Inspection format"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showSerials}
+                        onChange={(e) => setShowSerials(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded border-border-default text-primary focus:ring-primary"
+                      />
+                      Show S/N
+                    </label>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={addItem}
+                      className="glass-hover px-3 py-1.5 rounded-xl text-sm font-medium flex items-center gap-1.5"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add Item
+                    </motion.button>
+                  </div>
                 </div>
                 <div className="p-5">
                   <div className="overflow-x-auto">
                     <table className="w-full table-auto" role="grid">
                       <thead>
                         <tr className="border-b border-border-subtle bg-bg-secondary/50">
-                          <th className="w-[40px] px-2 py-3 text-center text-xs font-medium text-text-secondary">#</th>
+                          <th className="w-[40px] px-2 py-3 text-center text-xs font-medium text-text-secondary">S No</th>
                           <th className="w-0 flex-1 min-w-[220px] px-3 py-3 text-left text-xs font-medium text-text-secondary">Description</th>
-                          <th className="w-[90px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Size (Inch)</th>
-                          <th className="w-[90px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Class Rating</th>
+                          {isValve && (
+                            <>
+                              <th className="w-[90px] px-2 py-3 text-center text-xs font-medium text-text-secondary">SIZE (Inch)</th>
+                              <th className="w-[90px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Class</th>
+                            </>
+                          )}
                           <th className="w-[70px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Qty</th>
-                          <th className="w-[80px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Unit</th>
-                          <th className="w-[100px] px-2 py-3 text-right text-xs font-medium text-text-secondary">Rate (SAR)</th>
-                          <th className="w-[110px] px-2 py-3 text-right text-xs font-medium text-text-secondary">Amount (SAR)</th>
-                          <th className="w-0 flex-1 min-w-[160px] px-3 py-3 text-left text-xs font-medium text-text-secondary">Remarks</th>
+                          {!isValve && (
+                            <th className="w-[80px] px-2 py-3 text-center text-xs font-medium text-text-secondary">Unit</th>
+                          )}
+                          <th className="w-[100px] px-2 py-3 text-right text-xs font-medium text-text-secondary">
+                            {isValve ? "Unite Rate in SR (Pass or Fail)" : "Unit Rate (SAR)"}
+                          </th>
+                          <th className="w-[110px] px-2 py-3 text-right text-xs font-medium text-text-secondary">
+                            {isValve ? "Amount in SR (Pass or Fail)" : "Amount (SAR)"}
+                          </th>
+                          {isValve && (
+                            <th className="w-0 flex-1 min-w-[160px] px-3 py-3 text-left text-xs font-medium text-text-secondary">Remarks</th>
+                          )}
                           <th className="w-[40px] px-2 py-3 text-center text-xs font-medium text-text-secondary">
                             <GripVertical className="w-3 h-3 mx-auto text-text-muted" />
                           </th>
@@ -1002,8 +1047,8 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                       <tbody className="divide-y divide-border-subtle">
                         <AnimatePresence mode="popLayout">
                           {formData.items.map((item, index) => (
+                            <Fragment key={item.id}>
                             <motion.tr
-                              key={item.id}
                               initial={{ opacity: 0, y: -10 }}
                               animate={{ opacity: 1, y: 0 }}
                               exit={{ opacity: 0, y: 10 }}
@@ -1022,24 +1067,28 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                                   placeholder="Enter description..."
                                 />
                               </td>
-                              <td className="px-2 py-3">
-                                <input
-                                  type="text"
-                                  value={item.sizeInch || ""}
-                                  onChange={(e) => updateItem(item.id, "sizeInch", e.target.value)}
-                                  className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs text-center focus-ring border border-border-subtle bg-bg-secondary"
-                                  placeholder='e.g., 2"'
-                                />
-                              </td>
-                              <td className="px-2 py-3">
-                                <input
-                                  type="text"
-                                  value={item.classRating || ""}
-                                  onChange={(e) => updateItem(item.id, "classRating", e.target.value)}
-                                  className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs text-center focus-ring border border-border-subtle bg-bg-secondary"
-                                  placeholder="e.g., 150"
-                                />
-                              </td>
+                              {isValve && (
+                                <>
+                                  <td className="px-2 py-3">
+                                    <input
+                                      type="text"
+                                      value={item.sizeInch || ""}
+                                      onChange={(e) => updateItem(item.id, "sizeInch", e.target.value)}
+                                      className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs text-center focus-ring border border-border-subtle bg-bg-secondary"
+                                      placeholder='e.g., 2"'
+                                    />
+                                  </td>
+                                  <td className="px-2 py-3">
+                                    <input
+                                      type="text"
+                                      value={item.classRating || ""}
+                                      onChange={(e) => updateItem(item.id, "classRating", e.target.value)}
+                                      className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs text-center focus-ring border border-border-subtle bg-bg-secondary"
+                                      placeholder="e.g., 150"
+                                    />
+                                  </td>
+                                </>
+                              )}
                               <td className="px-2 py-3">
                                 <input
                                   type="number"
@@ -1050,19 +1099,21 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                                   className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs text-center focus-ring border border-border-subtle bg-bg-secondary"
                                 />
                               </td>
-                              <td className="px-2 py-3">
-                                <select
-                                  value={item.unit || "PCS"}
-                                  onChange={(e) => updateItem(item.id, "unit", e.target.value)}
-                                  className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs focus-ring border border-border-subtle bg-bg-secondary"
-                                >
-                                  {UNITS.map((unit) => (
-                                    <option key={unit} value={unit}>
-                                      {unit}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
+                              {!isValve && (
+                                <td className="px-2 py-3">
+                                  <select
+                                    value={item.unit || "PCS"}
+                                    onChange={(e) => updateItem(item.id, "unit", e.target.value)}
+                                    className="w-full glass-hover px-1.5 py-1 rounded-lg text-xs focus-ring border border-border-subtle bg-bg-secondary"
+                                  >
+                                    {UNITS.map((unit) => (
+                                      <option key={unit} value={unit}>
+                                        {unit}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                              )}
                               <td className="px-2 py-3">
                                 <input
                                   type="number"
@@ -1076,15 +1127,17 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                               <td className="px-2 py-3 text-right font-mono font-medium text-text-primary">
                                 {formatNumber(item.amount || 0)}
                               </td>
-                              <td className="px-3 py-3">
-                                <input
-                                  type="text"
-                                  value={item.remarks || ""}
-                                  onChange={(e) => updateItem(item.id, "remarks", e.target.value)}
-                                  className="w-full glass-hover px-2 py-1.5 rounded-lg text-sm focus-ring border border-border-subtle bg-bg-secondary"
-                                  placeholder="Remarks..."
-                                />
-                              </td>
+                              {isValve && (
+                                <td className="px-3 py-3">
+                                  <input
+                                    type="text"
+                                    value={item.remarks || ""}
+                                    onChange={(e) => updateItem(item.id, "remarks", e.target.value)}
+                                    className="w-full glass-hover px-2 py-1.5 rounded-lg text-sm focus-ring border border-border-subtle bg-bg-secondary"
+                                    placeholder="Remarks..."
+                                  />
+                                </td>
+                              )}
                               <td className="px-2 py-3 text-center">
                                 <div className="flex items-center justify-center gap-0.5">
                                   <motion.button
@@ -1123,6 +1176,26 @@ export function QuoteEditor({ selectedQuoteId }: { selectedQuoteId?: string }) {
                                 )}
                               </td>
                             </motion.tr>
+                            {(showSerials || Boolean(item.serialNo)) && (
+                              <tr className="border-b border-border-subtle bg-bg-secondary/30">
+                                <td colSpan={isValve ? 10 : 8} className="px-4 py-2">
+                                  <div className="flex items-center gap-2 max-w-md">
+                                    <span className="text-xs font-medium text-text-muted whitespace-nowrap">
+                                      S/N
+                                    </span>
+                                    <input
+                                      type="text"
+                                      value={item.serialNo || ""}
+                                      onChange={(e) => updateItem(item.id, "serialNo", e.target.value)}
+                                      className="w-full glass-hover px-2 py-1 rounded-lg text-xs focus-ring border border-border-subtle bg-bg-secondary"
+                                      placeholder={`Serial number for item ${index + 1}`}
+                                      aria-label={`Serial number for item ${index + 1}`}
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                            </Fragment>
                           ))}
                         </AnimatePresence>
                         {formData.items.length === 0 && (

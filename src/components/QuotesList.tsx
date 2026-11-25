@@ -38,7 +38,12 @@ import {
   readImportSources,
 } from '@/utils/quotationImport'
 import type { ImportGroup, ImportSource } from '@/utils/quotationImport'
-import { exportQuotationsToExcel, exportQuotationsToPdf } from '@/utils/quotationExport'
+import {
+  exportQuotationsToExcel,
+  exportQuotationsToPdf,
+  exportQuotationExcel,
+  exportQuotationPdf,
+} from '@/utils/quotationExport'
 import type { Quotation } from '@/types'
 
 const statusOptions = ['all', 'draft', 'sent', 'approved', 'rejected', 'expired'] as const
@@ -59,6 +64,7 @@ export function QuotesList() {
     activeCompanyId,
     addPriceBookItem,
     addCompany,
+    setActiveCompany,
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'sent' | 'approved' | 'rejected' | 'expired'>('all')
@@ -152,14 +158,24 @@ export function QuotesList() {
         ? importGroups
         : [{ source: importSources[0] || { kind: 'path', path: '', name: 'import' }, rows: importRows, clientName: 'Imported Client' }]
 
+      // Helper to create/select company
+      const getOrCreateCompany = (companyName: string): string => {
+        const slug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+        const companyId = `company-${slug || 'imported'}`
+        if (!companies.some((company) => company.name.toLowerCase() === companyName.toLowerCase())) {
+          addCompany({ id: companyId, name: companyName, currency: 'SAR', taxRate: 15 })
+        }
+        return companyId
+      }
+
       if (importTarget === 'priceBook') {
         let count = 0
+        const newCompanyIds: string[] = []
         groups.forEach((group) => {
-          const slug = group.clientName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-          const companyId = `company-${slug || 'imported'}`
-          if (!companies.some((company) => company.name.toLowerCase() === group.clientName.toLowerCase())) {
-            addCompany({ id: companyId, name: group.clientName, currency: 'SAR', taxRate: 15 })
-          }
+          const companyId = getOrCreateCompany(group.clientName)
+          newCompanyIds.push(companyId)
+          // Set first company as active
+          if (newCompanyIds.length === 1) setActiveCompany(companyId)
           group.rows
             .map(mapFlexiblePriceBookRow)
             .filter((row) => Object.keys(row).length > 0)
@@ -174,6 +190,9 @@ export function QuotesList() {
       } else {
         const imported = groups
           .map((group, index) => {
+            // Create/select company for this quotation
+            const companyId = getOrCreateCompany(group.clientName)
+            if (index === 0) setActiveCompany(companyId)
             const head = group.rows[0] || {}
             const merged = {
               ...head,
@@ -248,6 +267,26 @@ export function QuotesList() {
     try {
       await exportQuotationsToPdf(quotes, currency, companyName)
       addToast({ type: 'success', title: 'Exported', message: `${quotes.length} quotation(s) exported to PDF` })
+    } catch (err) {
+      console.error('PDF export failed:', err)
+      addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the PDF file.' })
+    }
+  }
+
+  const handleExportQuoteExcel = async (quote: Quotation) => {
+    try {
+      await exportQuotationExcel(quote, settings)
+      addToast({ type: 'success', title: 'Exported', message: `${quote.quoteNumber} exported to Excel` })
+    } catch (err) {
+      console.error('Excel export failed:', err)
+      addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the Excel file.' })
+    }
+  }
+
+  const handleExportQuotePdf = async (quote: Quotation) => {
+    try {
+      await exportQuotationPdf(quote, settings)
+      addToast({ type: 'success', title: 'Exported', message: `${quote.quoteNumber} exported to PDF` })
     } catch (err) {
       console.error('PDF export failed:', err)
       addToast({ type: 'error', title: 'Export Failed', message: 'Could not generate the PDF file.' })
@@ -588,6 +627,24 @@ export function QuotesList() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => handleExportQuotePdf(quote)}
+                            className="glass-hover p-2 rounded-xl text-text-secondary hover:text-primary focus-ring"
+                            aria-label={`Export PDF for ${quote.quoteNumber}`}
+                          >
+                            <FileText className="w-4 h-4" />
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => handleExportQuoteExcel(quote)}
+                            className="glass-hover p-2 rounded-xl text-text-secondary hover:text-secondary focus-ring"
+                            aria-label={`Export Excel for ${quote.quoteNumber}`}
+                          >
+                            <Download className="w-4 h-4" />
+                          </motion.button>
                           <motion.button
                             whileHover={{ scale: 1.1 }}
                             whileTap={{ scale: 0.9 }}
